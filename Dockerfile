@@ -23,3 +23,16 @@ COPY src/vllm_ple_mmap.py ${SP}/vllm_ple_mmap.py
 RUN cp ${PLE} ${PLE}.orig \
  && printf '\n\n# --- qwen38-flash-dgx: serve the PLE n-gram table from disk (VLLM_PLE_MMAP=1) ---\nfrom vllm_ple_mmap import apply as _ple_mmap_apply\n_ple_mmap_apply(Qwen3_8FlashNextNGramEmbedding)\n' >> ${PLE} \
  && python3 -c "import ast; ast.parse(open('${PLE}').read()); print('ple_layer.py patched OK')"
+
+# --- GB10 FLA fixes, contributed by @Saren-Arterius
+#     (https://github.com/Saren-Arterius/qwen3.8-Flash-DGX-AutoRound) ---
+# 1) sm_121 reports 99 KiB of shared memory per block; the flash-linear-attention
+#    gate asks for 100 KiB, so all 36 GDN layers silently fell back to small tiles.
+#    Lowering the gate to 99 KiB lets the GB10 take the big-tile path.
+# 2) fla#953: tl.dot race on Blackwell with num_warps=4 in chunk_delta_h -> pin 2.
+ARG FLA_UTILS=${SP}/vllm/third_party/flash_linear_attention/ops/utils.py
+ARG FLA_CDH=${SP}/vllm/third_party/flash_linear_attention/ops/chunk_delta_h.py
+RUN sed -i 's|DEFAULT = 102400|DEFAULT = 101376  # spark-fla-shmem: GB10 99KiB, big GDN tiles fit|' ${FLA_UTILS} \
+ && grep -q "spark-fla-shmem" ${FLA_UTILS} && echo "fla shmem gate patched" \
+ && sed -i 's|for num_warps in \[2, 4\]|for num_warps in [2]  # spark-fla-warps: fla#953 Blackwell tl.dot race|' ${FLA_CDH} \
+ && grep -q "spark-fla-warps" ${FLA_CDH} && echo "fla num_warps pinned"

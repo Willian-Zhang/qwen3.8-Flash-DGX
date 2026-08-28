@@ -135,6 +135,36 @@ gather turns the n-gram contribution to noise and the model degrades immediately
   as the page cache warms. `PREWARM=1` streams the whole table once at boot (~10 s) for
   steadier first-request latency.
 
+## Contributed GB10 fixes and the faster gather
+
+Three changes from [@Saren-Arterius](https://github.com/Saren-Arterius)'s fork
+([qwen3.8-Flash-DGX-AutoRound](https://github.com/Saren-Arterius/qwen3.8-Flash-DGX-AutoRound)),
+merged in and measured A/B on the GX10 (same flags, YaRN 500k, MTP=2, greedy, real
+prompts — no `ignore_eos`, which pushes this model into a degenerate post-EOS regime
+and makes decode numbers meaningless):
+
+| | before | after |
+|---|---|---|
+| Decode, 400-token answers (median of 6) | 21.8 tok/s | **26.2 tok/s** (+20%; 25–29 on a warm server) |
+| Prefill 8k (warm) | 2,289 tok/s | **~2,570 tok/s** (+12%) |
+| Prefill 32k | 2,316 tok/s | 2,418 tok/s (+4%) |
+| Needle at 92k tokens | found, 47.1 s | found, 44.7 s |
+
+1. **FLA shared-memory gate.** sm_121 reports 99 KiB of shared memory per block; the
+   flash-linear-attention gate (`ops/utils.py`, `DEFAULT = 102400`) asks for 100 KiB, so
+   all 36 GDN layers silently ran the small-tile kernels. Lowering the constant to
+   101376 lets the GB10 take the big-tile path. This is the same fix the
+   Qwen3.5-122B Spark recipe carried as `patch_fla_shmem.py`.
+2. **`chunk_delta_h` `num_warps=2` pin** — [fla#953](https://github.com/fla-org/flash-linear-attention/issues/953),
+   a `tl.dot` race on Blackwell with `num_warps=4`. A correctness fix; no speed effect expected.
+3. **PLE gather hot path** in `src/vllm_ple_mmap.py`: dedup row ids on CPU (`np.unique`),
+   gather only unique rows, stage them through a persistent pinned buffer with an async
+   H2D copy, expand on the GPU via the inverse index; decode-sized gathers (≤
+   `VLLM_PLE_MMAP_FAST_ROWS`=512 unique rows) skip the thread pool. Also bf16/f16 tables,
+   `VLLM_PLE_MMAP_DIR`, and a periodic `PLE mmap stats` line — which shows where the
+   remaining decode cost is: ~6.5 ms of the ~9.5 ms per lookup is the disk gather
+   itself (the page cache holds only part of the 47 GiB table at `GPU_MEM=0.80`).
+
 ## Independent reproduction and the native offload path
 
 [@jschmied](https://github.com/jschmied) reproduced this recipe on a DGX Spark

@@ -23,7 +23,7 @@ before: **~4–5× faster prefill, MTP (which the GGUF cannot do), and 2× the c
 | | llama.cpp IQ4_XS | **this repo (vLLM NVFP4)** |
 |---|---|---|
 | Prefill | ~540 tok/s | **~2,000–2,600 tok/s** (warm page cache) |
-| Decode, single stream | ~22 tok/s (no MTP) | **25–28 tok/s** typical with MTP=2, up to ~36 on predictable text; ~17 without MTP |
+| Decode, single stream | ~22 tok/s (no MTP) | **25–29 tok/s** on real answers with MTP=2 (up to ~36 on predictable text); ~17 without MTP |
 | Context | 262k | **262k native, 500k with YaRN** (needle found at 414k) |
 | Resident GPU memory | ~94 GiB (GGUF) | ~76 GiB weights + KV |
 | Aggregate throughput | single stream only | scales with concurrency — see below |
@@ -80,11 +80,11 @@ YARN=1 CTX=500000 scripts/serve.sh
 | `CTX` | `262144` | Max context. Native is 262144; with `YARN=1` up to `500000` is validated. |
 | `YARN` | `0` | `1` = YaRN rope scaling (factor 4, Qwen's recipe) for `CTX` > 262144. |
 | `SEQS` | `8` | Max concurrent sequences. **Do not benchmark with 1–2**: excess requests queue silently and aggregate tok/s flatlines (see below). |
-| `GPU_MEM` | `0.85` | Fraction of the 128 GB pool for weights+KV. `0.875` got OOM-killed on a 300k-token prefill with MTP — keep the margin. On a Spark the OS and the GPU share this pool, and an OOM there can freeze the box. |
+| `GPU_MEM` | `0.85` | Fraction of the 128 GB pool for weights+KV. `0.875` got OOM-killed on a 300k-token prefill with MTP; for long-running service we now run `0.80`, because after a day at `0.85` the box drifted into swap (vLLM's own pages evicted). On a Spark the OS and the GPU share this pool, and an OOM there can freeze the box. |
 | `MTP` | `2` | Speculative tokens from the model's MTP head (`0` = off). |
 | `KV_DTYPE` | `auto` | Keep `auto` (bf16): `fp8` is refused — the QSA layers require a bf16 KV cache. |
 | `PREWARM` | `0` | `1` streams the 48 GiB table once at boot to warm the page cache — steadier first-request latency, ~10 s extra startup. |
-| `WORKERS` | `32` | Threads used for the mmap gather. |
+| `WORKERS` | `32` | Threads used for the mmap gather (only used above `VLLM_PLE_MMAP_FAST_ROWS`=512 unique rows; decode-sized gathers run inline). |
 | `EXTRA` | | Extra vLLM flags, passed verbatim. |
 
 ## Throughput and concurrency
@@ -126,6 +126,26 @@ attention all run stock.
 
 Full details, including the GB10-specific bugs this works around and the long-context
 findings, are in [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md).
+
+### GB10 kernel fixes and the faster gather (contributed)
+
+Three improvements from [@Saren-Arterius](https://github.com/Saren-Arterius)'s fork,
+merged here with thanks (numbers below measured on the GX10, see `docs/HOW-IT-WORKS.md`):
+
+- **FLA shared-memory gate** — sm_121 reports 99 KiB of shared memory per block but the
+  flash-linear-attention gate asked for 100 KiB, so all 36 GDN layers silently ran on
+  small tiles. One `sed` in the Dockerfile lowers the gate to 99 KiB.
+- **`chunk_delta_h` `num_warps` pin** — works around a `tl.dot` race on Blackwell
+  ([fla#953](https://github.com/fla-org/flash-linear-attention/issues/953)). Correctness, not speed.
+- **PLE gather hot path** — CPU dedup of row ids, a persistent pinned staging buffer with an
+  async H2D copy, GPU-side expansion through the inverse index, and an inline fast path
+  for decode-sized batches (`VLLM_PLE_MMAP_FAST_ROWS`, default 512). Also: bf16/f16 tables,
+  `VLLM_PLE_MMAP_DIR` to serve the table from another directory, and a periodic
+  `PLE mmap stats` log line (`VLLM_PLE_MMAP_STATS_SEC`, default 30).
+
+Their fork goes further with an **int4 + fp8 hybrid checkpoint** (Intel AutoRound) that
+they measure at ~49 tok/s single-stream:
+[qwen3.8-Flash-DGX-AutoRound](https://github.com/Saren-Arterius/qwen3.8-Flash-DGX-AutoRound).
 
 ### Alternative: vLLM's native PLE CPU offload
 
@@ -189,6 +209,8 @@ docker run --rm -v "$PWD/src:/t" -w /t --entrypoint python3 \
 - NVFP4 checkpoint: **[RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4)**.
 - Serving engine and base image: **vLLM** (`vllm/vllm-openai:qwen38-flash-next`,
   the `release/qwen38next` recipe / PR #53896).
+- GB10 FLA fixes and the faster PLE gather: **[@Saren-Arterius](https://github.com/Saren-Arterius)**
+  ([qwen3.8-Flash-DGX-AutoRound](https://github.com/Saren-Arterius/qwen3.8-Flash-DGX-AutoRound)).
 - Independent reproduction on a DGX Spark, the native-offload fixes and the
   concurrency measurements: **[@jschmied](https://github.com/jschmied)**
   ([issue #1](https://github.com/blazux/qwen3.8-Flash-DGX/issues/1),
