@@ -78,8 +78,11 @@ issues. All are handled by the patch + the flags in `scripts/serve.sh`:
    not re-run that Python line on graph replay. Fix: register in `__init__`.
 
 3. **Two stock-model issues on sm_121, unrelated to this patch but required to run:**
-   - `--no-enable-prefix-caching` — a GDN `in_proj` GEMM hits
-     `CUBLAS_STATUS_INTERNAL_ERROR` on the cached-block path (2nd identical prompt).
+   - prefix caching crashed (`CUBLAS_STATUS_INTERNAL_ERROR` in a GDN `in_proj` GEMM, later
+     `illegal memory access` in the Mamba state copy) on the cached-block path. The root
+     cause turned out to be a vLLM block-size bug, fixed in this image — see
+     [Prefix caching](#prefix-caching-the-root-cause-and-the-fix) below. The old advice
+     (`--no-enable-prefix-caching`) is no longer needed.
    - full `torch.compile` off — an Inductor int64-indexing assert
      (`index out of bounds`) fires in the embedding gather codegen on sm_121. PIECEWISE
      capture with compile disabled on the splitting op sidesteps it.
@@ -183,3 +186,128 @@ aggregate throughput of ~267 tok/s at 48 streams with page-fault cost per token
 - vLLM PR (Flash-Next support): <https://github.com/vllm-project/vllm/pull/53896>
 - NVFP4 checkpoint: <https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4>
 - SGLang day-0 write-up (PLE offload mechanics): <https://www.lmsys.org/blog/2026-08-26-qwen-flash-next>
+
+## Prefix caching: the root cause and the fix
+
+With `--enable-prefix-caching` vLLM puts this hybrid model's Mamba-style layers (the 36
+GDN layers and the PLE short-conv) in cache mode `align`: their recurrent state is
+captured at every `mamba_block_size` boundary (1600 tokens here — vLLM also raises the
+attention block to 1600 so both page sizes agree) and restored when a later request
+hits a cached prefix.
+
+What we saw on GB10, in order:
+
+1. Stock image: `CUDA illegal memory access` on the first batch of cached requests.
+2. With [vllm#50729](https://github.com/vllm-project/vllm/pull/50729) (a genuine fix
+   for an overlapping-copy race) — same crash.
+3. With @Saren-Arterius's bounds guard on top: no crash, but 40–80 "out-of-range block
+   id" skips per ~100 requests, and greedy outputs that **changed on cache hits** (an
+   answer became an empty completion, or the reverse).
+4. Ruling things out one at a time (all with the deterministic top-k, so any difference
+   is real): `--mamba-ssm-cache-dtype float32`, `MTP=0`, `--no-async-scheduling`,
+   `--mamba-cache-mode all` — every variant produced the *same* wrong outputs. So it was
+   structural, not numerical.
+5. Instrumenting the two state-restore sites (checksums of the GDN layer-0 state and the
+   PLE conv state, with the block index and `has_initial_state`) gave the answer in one
+   probe. Cold request, 5150 tokens: state after 5136 tokens = `4.443284220e3`. Cache hit
+   at 3200 tokens: `has_initial_state=True`, restored state checksum **`0.000`**, from a
+   block slot that had never been written.
+
+The bug: `EngineCore._initialize_kv_caches` (`vllm/v1/engine/core.py`) sets
+`cache_config.block_size = min(group.block_size for every KV group)`. For this model
+one of the groups is the QSA raw-key ring (`CircularBufferSpec`), whose block is 8 or
+16 tokens. `cache_config.mamba_block_size` stays 1600, but two consumers used
+`cache_config.block_size` *as* the Mamba block size:
+
+- `v1/worker/gpu/model_states/mamba_hybrid.py`, `add_request`: the running state slot
+  is seeded from `(num_computed_tokens - 1) // block_size` → `3199 // 16 = 199` instead
+  of `1`. Column 199 is past the end of the request's Mamba block-table row, the
+  persistent table is zero-filled there, block id 0 is the null block — in range, so the
+  guard never fires — and its all-zero page is copied in as the "restored" state.
+- `v1/core/sched/scheduler.py`, `_mamba_block_aligned_split`: prefill chunks were
+  aligned to 16-token boundaries instead of 1600, so states were almost never captured
+  at a real boundary and cold requests rarely cached anything.
+
+The fix (`src/patch_mamba_block_size.py`) is two lines: use
+`cache_config.mamba_block_size` in the first and the scheduler's own `self.block_size`
+(the LCM of all group block sizes, 1600) in the second. Validation on the same probe:
+hit restores `4.149867426e3` = exactly the state the cold run wrote at 3200; first-token
+top-5 logprobs identical to the 4th decimal between cold and two hits on 4k/8k/15k/31k
+prompts; 32/32 greedy completions identical cold vs hit; guard counter 0 through 100
+concurrent multi-turn requests; tournament 45/51 with caching vs 44–45 without.
+
+Note that in single-process mode (`UniProcExecutor`, the default on one GPU) the
+scheduler and the worker share the same `vllm_config` object, so both halves of the bug
+apply; with the multiprocess executor only the scheduler half would. We will upstream
+this.
+
+## Exact top-k for the sparse attention
+
+QSA scores every query against compressed key blocks and keeps the top `k` (512–2048
+tokens' worth). vLLM does that with `torch.ops._C.persistent_topk`, a histogram-based
+approximate select. On GB10 the faster `cooperative_topk` is disabled
+(`not is_device_capability_family(120)`), so `persistent_topk` runs for prefill *and*
+decode.
+
+@k3dani ([issue #3](https://github.com/blazux/qwen3.8-Flash-DGX/issues/3),
+[vllm#51782](https://github.com/vllm-project/vllm/issues/51782)) showed that the kernel
+drops legitimate candidates when more than 16384 logits share a coarse histogram bin —
+which trained indexer logits do — and that its output differs between launches. We
+confirmed both: with the stock kernel, 3 identical greedy runs of the same prompt gave
+3 different outputs on 2 of 4 prompts (2.6k–128k tokens), and first-token top-5 sets
+that didn't even overlap.
+
+`src/patch_qsa_exact_topk.py` adds `VLLM_QSA_EXACT_TOPK=1`: mask the columns the
+scoring kernel never wrote (≥ `visible_blocks[row]`, they are `torch.empty`) to `-inf`
+in place, then `torch.topk` over the row. Results: 4/4 prompts stable, first-token
+logprobs identical to the 4th decimal across runs, tournament score unchanged (44/51 →
+44/51 on NVFP4; 45/51 with prefix caching). Cost on the GX10: decode unchanged, prefill
+−8% at 8k, −20–40% at 32k+ (the top-k runs over the full visible width per chunk).
+Masking the uninitialized columns and keeping the stock kernel (`VLLM_QSA_EXACT_TOPK=fill`)
+does **not** restore determinism, so the kernel itself is the problem, not the garbage.
+
+## Hybrid mode: NVFP4 experts + blockwise-fp8 side layers
+
+The RadixArk checkpoint quantizes only the routed experts (ModelOpt NVFP4) and leaves
+the dense side layers — GDN `in_proj`/`out_proj`, QSA `q/k/v/o_proj`, shared experts,
+~15 GiB — in bf16. Every decoded token reads all of them, so they set the decode
+bandwidth floor. `scripts/prepare-hybrid.sh` rewrites those 300 tensors as blockwise
+fp8-e4m3 with a per-128×128 fp32 `weight_scale_inv` (the DeepSeek-V3 layout that vLLM's
+`Fp8LinearMethod` already loads), in a sibling snapshot directory made of relative
+symlinks — only the 4 rewritten shards are real files.
+
+Serving them needs a small dispatch shim (`src/vllm_fp8_hybrid_modelopt.py`,
+`VLLM_FP8_HYBRID=1`), a port of @Saren-Arterius's int4+fp8 dispatch to the ModelOpt
+config: it scans the safetensors metadata for `F8_E4M3` weights that have a
+`weight_scale_inv` sibling and, for those (fused) modules, returns vLLM's blockwise-fp8
+linear method instead of the bf16 path, leaving the NVFP4 MoE path alone. One
+model-specific wrinkle: `qsa.py` builds the QSA `qkv_proj` with
+`without_modelopt_fp4(quant_config)` — i.e. with **no** quant config at all — so the
+shim is never consulted there and loading dies on `'QKVParallelLinear' object has no
+attribute 'data'`. The Dockerfile redirects that call to a proxy config that dispatches
+to fp8 when the checkpoint has fp8 q/k/v for that layer and to bf16 otherwise.
+
+Measured on the GX10 (YaRN 500k, MTP=2, exact top-k, prefix caching, greedy, real
+prompts):
+
+| | NVFP4 | hybrid | Intel int4 + fp8 (fork) |
+|---|---|---|---|
+| Tournament (17 agentic scenarios × 3, ok/51) | 45 | 45 | 44 |
+| Deterministic at T=0 | yes | yes | **no** (also with Marlin atomic adds off) |
+| Decode, 400-token answers (median of 6) | 25.7 tok/s | **30.8 tok/s** | 34.3 tok/s |
+| Prefill 32k | ~1,900 tok/s | ~1,800 tok/s | ~1,900 tok/s |
+| Needle at 92k | 64 s | 69 s | 69 s |
+| TTFT, 2nd+ turn, 8 concurrent 20k-token conversations | 5.9 s | **4.1 s** | 8.7 s |
+| KV cache (`GPU_MEM=0.80`) | 582k tokens | **633k** | 762k |
+| Resident weights | ~84 GiB | ~77 GiB | ~70 GiB |
+
+The six failed tournament passes are the same two scenarios (`b6_reconcile`,
+`c5_inventory_reconcile`) in every configuration we have ever run, including the
+unquantized-side-layer NVFP4 without any of our changes — they are the model, not the
+quantization. Before we raised the harness's turn budget the hybrid lost a few extra
+passes by spending one more tool call (it checks balances before acting), which is a
+behavioural nuance rather than a precision loss; every tool call it made was correct.
+
+The Intel AutoRound variant is fastest at raw decode but could not be made
+deterministic and has the worst cached-TTFT (its prefill is the slowest), so we did not
+adopt it; the numbers are here for completeness.
