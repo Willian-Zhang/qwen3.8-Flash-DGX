@@ -117,3 +117,27 @@ compile lines), not caching — verify with the hit-rate telemetry, not latency.
   (-31%); cumulative hit rate climbing as expected (13.3% after a handful of
   shared-prefix requests). First reuse can miss if sent immediately after the
   cold request; blocks land after a beat.
+
+## Post-rebase note (2026-08-30, after merging main's 8347e7c)
+
+Re-checked against main's "working prefix caching" commit (`8347e7c`:
+`src/patch_mamba_block_size.py`, `src/mamba_utils_guarded.py`).
+
+- **LMCache conclusion unchanged.** The hard stop lives in LMCache's own
+  `GetStoreMetadata` (`min()` across engine KV groups; the QSA circular-buffer
+  group still contributes 8 tokens x 1 block). `8347e7c` only fixes vLLM-side
+  *consumers* of `cache_config.block_size`; the KV group layout is identical and
+  `mamba_utils_guarded.py` has no `CircularBufferSpec` handling. Still waiting on
+  upstream.
+- **The prefix-caching numbers above should be treated as superseded.** They were
+  measured on an image without `patch_mamba_block_size.py`; per
+  `docs/HOW-IT-WORKS.md`, align-mode hits on such an image can silently restore
+  an all-zero mamba state (hit rate and TTFT look fine, outputs wrong), and this
+  investigation never validated cold-vs-hit output equality. The rebased image
+  includes the fix, which main validated properly (state checksums, 32/32 greedy
+  cold==hit), so `PREFIX_CACHE=1` stands — on the strength of main's validation,
+  not the measurements above.
+- `--mamba-cache-mode align` is now redundant for plain prefix caching (vLLM
+  selects align automatically when prefix caching is on) but harmless, and
+  LMCache's startup checks (timeline #4–5) still want prefix caching enabled, so
+  serve.sh keeps passing it explicitly.
