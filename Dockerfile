@@ -10,6 +10,7 @@
 #   4. Prefix-caching block_size fix                   (always on; needed for --enable-prefix-caching)
 #   5. Exact, deterministic QSA top-k                  (VLLM_QSA_EXACT_TOPK=1)
 #   6. NVFP4 experts + fp8 side-layers "hybrid" mode   (VLLM_FP8_HYBRID=1)
+#   7. fp8_e4m3 KV cache on the QSA path              (--kv-cache-dtype fp8_e4m3)
 #
 #   docker build -t qwen38-flash-dgx .
 #
@@ -82,3 +83,11 @@ RUN cp ${MO} ${MO}.orig \
  && sed -i 's/^from \. import model$/from . import model\nfrom vllm_fp8_hybrid_modelopt import excluded_quant_config as _fp8_hybrid_excluded/' ${QSA} \
  && grep -q "_fp8_hybrid_excluded(quant_config)" ${QSA} && grep -q "^from vllm_fp8_hybrid_modelopt import" ${QSA} \
  && python3 -c "import ast; ast.parse(open('${QSA}').read()); print('qsa.py hooked OK')"
+
+# --- 7. fp8_e4m3 KV cache on the QSA path (--kv-cache-dtype fp8_e4m3) ------------------
+# Contributed by @Nanetnounou (issue #6, vllm#54426). Dequantizes on the read side of the
+# QSA Triton kernels (main KV and the indexer's raw-key ring), relaxes the bf16-only guards.
+# Inert with --kv-cache-dtype auto (the Triton branch is compiled out). ~1.9x KV pool,
+# 1M context on one box, at a speed and quality cost — see README before using it.
+COPY src/patch_qsa_fp8_kv.py /tmp/patch_qsa_fp8_kv.py
+RUN python3 /tmp/patch_qsa_fp8_kv.py ${SP} && rm /tmp/patch_qsa_fp8_kv.py
