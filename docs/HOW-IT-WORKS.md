@@ -215,18 +215,23 @@ What we saw on GB10, in order:
 
 The bug: `EngineCore._initialize_kv_caches` (`vllm/v1/engine/core.py`) sets
 `cache_config.block_size = min(group.block_size for every KV group)`. For this model
-one of the groups is the QSA raw-key ring (`CircularBufferSpec`), whose block is 8 or
-16 tokens. `cache_config.mamba_block_size` stays 1600, but two consumers used
+one of the groups is the QSA raw-key ring (`CircularBufferSpec`, `qsa_cache.py`), whose
+block is its ring capacity `compress_ratio × cdiv(compress_ratio + num_spec, compress_ratio)`
+= 8 tokens with MTP=2, 4 without. (This group type does not exist on upstream vLLM `main`,
+where the same `min()` is harmless because every group is 1600.) `cache_config.mamba_block_size` stays 1600, but two consumers used
 `cache_config.block_size` *as* the Mamba block size:
 
 - `v1/worker/gpu/model_states/mamba_hybrid.py`, `add_request`: the running state slot
-  is seeded from `(num_computed_tokens - 1) // block_size` → `3199 // 16 = 199` instead
-  of `1`. Column 199 is past the end of the request's Mamba block-table row, the
+  is seeded from `(num_computed_tokens - 1) // block_size` → `3199 // 8 = 399` instead
+  of `1`. Column 399 is past the end of the request's Mamba block-table row, the
   persistent table is zero-filled there, block id 0 is the null block — in range, so the
   guard never fires — and its all-zero page is copied in as the "restored" state.
 - `v1/core/sched/scheduler.py`, `_mamba_block_aligned_split`: prefill chunks were
-  aligned to 16-token boundaries instead of 1600, so states were almost never captured
-  at a real boundary and cold requests rarely cached anything.
+  aligned to 8-token boundaries instead of 1600, so states were almost never captured
+  at a real boundary and cold requests rarely cached anything. This is directly visible
+  in the traces: a 5,150-token cold prompt stopped its chunk at 5,136 with MTP=2
+  (`5150 - 5150 % 8 - 8`, the Eagle back-off) and at 5,148 with MTP=0 (`5150 - 5150 % 4`)
+  — exactly the ring block sizes, never 4,800.
 
 The fix (`src/patch_mamba_block_size.py`) is two lines: use
 `cache_config.mamba_block_size` in the first and the scheduler's own `self.block_size`

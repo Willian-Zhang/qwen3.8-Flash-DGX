@@ -148,10 +148,10 @@ Our own box runs the hybrid. If you want the checkpoint exactly as published, st
 access`) and, with a bounds guard in place, to **silently return different answers on
 cache hits**. We traced it (details in [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md)):
 vLLM's engine core overwrites `cache_config.block_size` with the *smallest* KV-group
-block size — 16 tokens here, because of the QSA raw-key ring — while the Mamba state
-block is 1600 tokens. Two places used the former as the latter, so on a prefix hit the
-worker computed the state slot as `(3200-1)//16` instead of `1`, read past the block
-table row, and restored an **all-zero Mamba state**. The image carries a two-line fix;
+block size — 8 tokens here with MTP=2 (4 without), the QSA raw-key ring — while the Mamba
+state block is 1600 tokens. Two places used the former as the latter, so on a prefix hit
+the worker computed the state slot as `(3200-1)//8 = 399` instead of `1`, read past the
+block table row, and restored an **all-zero Mamba state**. The image carries a two-line fix;
 with it, cold and cache-hit outputs are bit-identical (state checksums and first-token
 logprobs match exactly) and the tournament score is unchanged.
 
