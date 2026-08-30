@@ -15,8 +15,9 @@
 #                     hybrid-mtp = hybrid with the MTP draft experts in NVFP4 (grafted from
 #                     Inferact's checkpoint): ~3.4 GB less on the card, ~4x fewer bytes read
 #                     per draft step. Needs scripts/prepare-mtp-graft.sh
-#   PREFIX_CACHE=1    1 = --enable-prefix-caching (correct with this image's block_size fix;
-#                     repeated prefixes — system prompts, multi-turn, tool loops — skip the prefill)
+#   PREFIX_CACHE=1    1 = --enable-prefix-caching --mamba-cache-mode align (correct with this
+#                     image's block_size fix; repeated prefixes — system prompts, multi-turn,
+#                     tool loops — skip the prefill; measured 12-18% prefix hits)
 #   DET_TOPK=1        1 = deterministic QSA top-k KERNEL (@jschmied, vllm#55122): identical output at
 #                     temperature 0 at no prefill cost. The default.
 #   EXACT_TOPK=0      1 = exact torch.topk fallback (also deterministic, but -20-40% long prefill); wins over DET_TOPK
@@ -50,6 +51,21 @@
 #   KV_DTYPE=auto     auto (=bf16) recommended; fp8_e4m3 = x1.9 KV / 1M ctx at a speed+quality cost (README)
 #   PREWARM=0         1 = stream the 48 GiB table once at boot to warm the page cache
 #   WORKERS=32        threads for the mmap gather
+#   LMCACHE=0         1 = LMCache KV offload to NVMe. Boots clean (MP mode,
+#                     standalone 'lmcache-server' container, HMA connector) but is
+#                     INERT on this model: the QSA indexer circular-buffer KV
+#                     group caps LMCache's storable prefix at 8 tokens, so nothing
+#                     is ever stored. See docs/lmcache-investigation.md. Flip the
+#                     default when LMCache ships circular-buffer support. Forces PREFIX_CACHE=1
+#   LMC_PORT=5557     ZMQ port of the LMCache server (5555 is taken on this host)
+#   LMC_HTTP_PORT=8090  LMCache management/metrics HTTP port
+#   LMC_DISK_DIR=$HOME/run/lmcache-disk   host NVMe dir backing the L2 cache
+#   LMC_DISK_GB=150   NVMe L2 cache budget (GB)
+#   LMC_L1_GB=5       server-side RAM L1 (GB) -- lives in the 128 GB unified
+#                     pool next to weights+KV, keep it small
+#   LMC_CHUNK=1600    LMCache chunk size in tokens. Must be a multiple of the
+#                     attention block size, which mamba page parity pins to 1600
+#                     on this model -- the connector aborts otherwise
 #   EXTRA=            extra vllm flags passed verbatim
 #   COMPILE_CACHE=    where to keep vLLM's compiled graphs and FlashInfer's JIT modules across
 #                     boots. Unset (default) = inside the container, which this script recreates
@@ -86,6 +102,13 @@ PROM_MULTIPROC="${PROM_MULTIPROC:-0}"
 PREWARM="${PREWARM:-0}"
 EXTRA="${EXTRA:-}"
 COMPILE_CACHE="${COMPILE_CACHE:-}"
+LMCACHE="${LMCACHE:-0}"
+LMC_PORT="${LMC_PORT:-5557}"
+LMC_HTTP_PORT="${LMC_HTTP_PORT:-8090}"
+LMC_DISK_DIR="${LMC_DISK_DIR:-$HOME/run/lmcache-disk}"
+LMC_DISK_GB="${LMC_DISK_GB:-150}"
+LMC_L1_GB="${LMC_L1_GB:-5}"
+LMC_CHUNK="${LMC_CHUNK:-1600}"
 
 # Resolve the local snapshot directory and map it to the in-container mount.
 REPO_DIR="$HF_CACHE/hub/models--${MODEL//\//--}"
@@ -231,8 +254,36 @@ DETENV+=(-e VLLM_PLE_MMAP_MADVISE="$MADVISE")
 case "$FAST_ROWS" in ''|*[!0-9]*) echo "!! FAST_ROWS must be a non-negative integer (0 = thread pool for every gather, 512 = old inline path)"; exit 1 ;; esac
 DETENV+=(-e VLLM_PLE_MMAP_FAST_ROWS="$FAST_ROWS")
 LOGARGS=(); [ "$LOG_REQUESTS" = 1 ] && { DETENV+=(-e VLLM_LOGGING_LEVEL=DEBUG); LOGARGS=(--enable-log-requests --enable-log-outputs); }
-PC_ARG=--no-enable-prefix-caching
-[ "$PREFIX_CACHE" = 1 ] && PC_ARG=--enable-prefix-caching
+# LMCache (MP mode): a standalone 'lmcache server' container holds the cache --
+# small RAM L1 (the GB10 "CPU" is the same 128 GB unified pool the GPU uses, so
+# keep it tiny) tiered onto an fs_native NVMe L2. vLLM attaches over ZMQ via
+# LMCacheMPConnector, the only LMCache connector with HMA support, which this
+# hybrid (attention+GDN+QSA) model requires at startup.
+# LMCache requires prefix caching + aligned mamba snapshots at startup.
+if [ "$LMCACHE" != 0 ]; then PREFIX_CACHE=1; fi
+if [ "$PREFIX_CACHE" = 1 ]; then
+  PFX_ARGS=(--enable-prefix-caching --mamba-cache-mode align)
+else
+  PFX_ARGS=(--no-enable-prefix-caching)
+fi
+LMC_RUN=(); LMC_ARGS=()
+if [ "$LMCACHE" != 0 ]; then
+  mkdir -p "$LMC_DISK_DIR"
+  if ! docker ps --format '{{.Names}}' | grep -qx lmcache-server; then
+    docker rm -f lmcache-server >/dev/null 2>&1 || true
+    docker run -d --name lmcache-server --restart unless-stopped \
+      --gpus all --ipc=host --network host \
+      -v "$LMC_DISK_DIR:/lmcache" \
+      --entrypoint lmcache "$IMAGE" server \
+        --host 0.0.0.0 --port "$LMC_PORT" --http-port "$LMC_HTTP_PORT" \
+        --l1-size-gb "$LMC_L1_GB" --eviction-policy LRU --chunk-size "$LMC_CHUNK" \
+        --supported-transfer-mode auto \
+        --l2-adapter "{\"type\":\"fs_native\",\"base_path\":\"/lmcache/l2\",\"num_workers\":8,\"max_capacity_gb\":$LMC_DISK_GB}"
+    echo ">> lmcache-server started (zmq :$LMC_PORT, http :$LMC_HTTP_PORT, l1 ${LMC_L1_GB}G ram, l2 ${LMC_DISK_GB}G nvme at $LMC_DISK_DIR)"
+  fi
+  LMC_RUN=(--add-host=host.docker.internal:host-gateway -e LMCACHE_LOG_LEVEL="${LMC_LOG:-INFO}")
+  LMC_ARGS=(--kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"lmcache.mp.host\":\"host.docker.internal\",\"lmcache.mp.port\":$LMC_PORT,\"lmcache.mp.mp_transfer_mode\":\"engine_driven\"}}")
+fi
 
 # PROM_MULTIPROC=1 (opt-in): the vllm:ple_mmap_* counters (src/vllm_ple_mmap.py) live in the
 # EngineCore process. vLLM only puts prometheus_client into multiprocess mode for
@@ -270,15 +321,16 @@ docker run -d --name "$NAME" --restart unless-stopped \
   -e VLLM_QSA_EXACT_TOPK="$EXACT_TOPK" "${DETENV[@]}" -e VLLM_FP8_PAD_M4="$PAD_M4" \
   -e VLLM_USE_FLASHINFER_SAMPLER=1 -e VLLM_ALLOW_LONG_MAX_MODEL_LEN="$ALLOW_LONG" \
   "${HYBRID_ENV[@]}" \
+  "${LMC_RUN[@]}" ${DOCKER_EXTRA:-} \
   "$IMAGE" \
   "$SNAP_IN" --served-model-name qwen3.8-flash-next \
     --host 0.0.0.0 --port 8000 --load-format safetensors \
     --max-model-len "$CTX" --max-num-seqs "$SEQS" --gpu-memory-utilization "$GPU_MEM" \
-    $PC_ARG --enable-chunked-prefill --max-num-batched-tokens 8192 \
+    "${PFX_ARGS[@]}" --enable-chunked-prefill --max-num-batched-tokens 8192 \
     $CC \
     --no-enable-flashinfer-autotune \
     --kv-cache-dtype "$KV_DTYPE" ${KV_CACHE_MEM:+--kv-cache-memory-bytes "$KV_CACHE_MEM"} \
-    "${OVR_ARGS[@]}" "${LOGARGS[@]}" $EXTRA \
+    "${OVR_ARGS[@]}" "${LOGARGS[@]}" "${LMC_ARGS[@]}" $EXTRA \
     --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3 \
     "${TEMPLATE_ARGS[@]}" "${SPEC[@]}"
 
@@ -297,6 +349,6 @@ case "$STATE" in
     ;;
 esac
 
-echo ">> $NAME starting on :$PORT (model 'qwen3.8-flash-next', mode=$MODE, ctx $CTX, yarn=$YARN, mtp=$MTP, seqs=$SEQS, prefix_cache=$PREFIX_CACHE, det_topk=$DET_TOPK, exact_topk=$EXACT_TOPK, pad_m4=$PAD_M4, draft_vocab=$DRAFT_VOCAB, madvise=$MADVISE, fast_rows=$FAST_ROWS, effort_alias=$EFFORT_ALIAS_STATE${COMPILE_CACHE:+, compile_cache=$COMPILE_CACHE})"
+echo ">> $NAME starting on :$PORT (model 'qwen3.8-flash-next', mode=$MODE, ctx $CTX, yarn=$YARN, mtp=$MTP, seqs=$SEQS, prefix_cache=$PREFIX_CACHE, det_topk=$DET_TOPK, exact_topk=$EXACT_TOPK, pad_m4=$PAD_M4, draft_vocab=$DRAFT_VOCAB, madvise=$MADVISE, fast_rows=$FAST_ROWS, effort_alias=$EFFORT_ALIAS_STATE, lmcache=$LMCACHE${COMPILE_CACHE:+, compile_cache=$COMPILE_CACHE})"
 echo ">> first boot loads ~75 GiB of weights (~8-13 min). Follow:  docker logs -f $NAME"
 echo ">> ready when the log says 'Application startup complete'. Then: scripts/smoke-test.sh"
