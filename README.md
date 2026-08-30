@@ -29,27 +29,36 @@ If you cloned this before, here is the short version (details in the linked sect
 
 - **Prefix caching works now** — `--enable-prefix-caching` was crashing, then silently
   returning wrong answers on cache hits. Root cause was a vLLM block-size bug that made
-  every prefix hit restore an *all-zero* Mamba state; two-line fix in the image.
+  every prefix hit restore an *all-zero* Mamba state; two-line fix in the image. Getting
+  there took [@Saren-Arterius](https://github.com/Saren-Arterius)'s pointer to
+  vllm#50729 and their state-copy guard, and [@0xBakeer](https://github.com/0xBakeer)'s
+  attempt to reproduce it, which sharpened the write-up.
   `PREFIX_CACHE=1` is the new default. Repeated prefixes (system prompts, multi-turn,
   tool loops) skip the prefill: ~14 s → ~1.4 s TTFT on a 20k-token prefix.
   → [Prefix caching now works](#prefix-caching-now-works-and-why-it-didnt)
 - **Greedy decoding is deterministic now** — the GB10 sparse-attention top-k kernel was
-  non-deterministic and dropped candidates (reported by @k3dani, issue #3). Exact top-k
+  non-deterministic and dropped candidates, diagnosed and reported upstream by
+  [@k3dani](https://github.com/k3dani) (issue #3, vllm#51782). Exact top-k
   is the new default (`EXACT_TOPK=1`); identical outputs at temperature 0, same
   tournament score, costs some long-prefill speed. → [Deterministic top-k](#deterministic-top-k-exact_topk1-default)
 - **Two checkpoint modes** — `MODE=nvfp4` (as published) or `MODE=hybrid` (NVFP4 experts
   + fp8 side layers, one-time `scripts/prepare-hybrid.sh`): **+20% decode, +8% KV,
-  same quality**. Our box runs the hybrid. → [Two checkpoint modes](#two-checkpoint-modes-nvfp4-or-hybrid)
-- **Also in the image**: vllm#50729 (Mamba state-copy race) + a bounds guard, the
-  GB10 FLA fixes and the faster PLE gather from @Saren-Arterius's fork.
+  same quality**. Our box runs the hybrid. The fp8 side-layer conversion and the
+  original int4+fp8 dispatch it is ported from are
+  [@Saren-Arterius](https://github.com/Saren-Arterius)'s. → [Two checkpoint modes](#two-checkpoint-modes-nvfp4-or-hybrid)
+- **Also in the image**: vllm#50729 (Mamba state-copy race, by
+  [@AndreasKaratzas](https://github.com/AndreasKaratzas)) + a bounds guard, the GB10 FLA
+  fixes and the faster PLE gather from [@Saren-Arterius](https://github.com/Saren-Arterius)'s fork.
 - **We benchmarked the int4 (Intel AutoRound) variant too** with the same patches:
   fastest raw decode, but not deterministic and slowest cached-TTFT, so we did not adopt
   it. Numbers in [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md#hybrid-mode-nvfp4-experts--blockwise-fp8-side-layers).
-- **fp8 KV cache is available** (`KV_DTYPE=fp8_e4m3`, contributed by @Nanetnounou): ×1.9 KV,
-  1M context on one box — at a speed and quality cost, so it is opt-in. → [fp8 KV cache](#optional-fp8-kv-cache-1m-context)
+- **fp8 KV cache is available** (`KV_DTYPE=fp8_e4m3`), contributed by
+  [@Nanetnounou](https://github.com/Nanetnounou): ×1.9 KV, 1M context on one box — at a
+  speed and quality cost, so it is opt-in. → [fp8 KV cache](#optional-fp8-kv-cache-1m-context)
 - `scripts/smoke-test.sh` now also checks the prefix-cache hit and determinism, and
   measures decode on a real answer instead of `ignore_eos` (which produces meaningless
-  numbers with this model).
+  numbers with this model). `scripts/download-weights.sh` now forwards `HF_TOKEN`
+  ([@wawimundo](https://github.com/wawimundo), PR #4).
 
 Everything was measured on one ASUS GX10 with a 17-scenario agentic tournament (3 repeats
 each), single-request speed benches on real prompts, and state checksums for the
