@@ -135,8 +135,11 @@ gather turns the n-gram contribution to noise and the model degrades immediately
   latency at batch 1; MTP amortizes it. Removing that sync (staging ids through a
   pinned buffer, or a small resident hot-row cache) is the obvious next optimization.
 - **First request into a cold region** of the table pays some NVMe I/O; it smooths out
-  as the page cache warms. `PREWARM=1` streams the whole table once at boot (~10 s) for
-  steadier first-request latency.
+  as the page cache warms. This makes single-shot prefill measurements cache-state
+  dependent: the same prompt can run 2–3× slower on the first pass than once the rows it
+  touches are resident, and the lower `GPU_MEM` is, the more RAM the page cache keeps for
+  the 48 GiB table. Benchmark prefill on a second pass (or after `PREWARM=1`, which
+  streams the whole table once at boot, ~10 s) and say which one you are quoting.
 
 ## Contributed GB10 fixes and the faster gather
 

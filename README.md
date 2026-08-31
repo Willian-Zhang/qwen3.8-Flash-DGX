@@ -66,7 +66,7 @@ prefix-caching work; nothing here is extrapolated.
 
 | | llama.cpp IQ4_XS | **NVFP4 (this repo)** | **hybrid (this repo)** |
 |---|---|---|---|
-| Prefill | ~540 tok/s | **~1,500–2,000 tok/s** (exact top-k; ~2,400 with the stock kernel) | same |
+| Prefill | ~540 tok/s | **~1,500–2,000 tok/s** (exact top-k; ~2,400 with the stock kernel) — warm page cache; a first pass over a cold region of the table reads from NVMe and can be 2–3× slower (see `PREWARM`) | same |
 | Decode, single stream | ~22 tok/s (no MTP) | **~26 tok/s** with MTP=2 | **~31 tok/s** |
 | Prefix-cache hit, TTFT on a 20k-token prefix | n/a | **~1.4 s** (vs ~14 s cold) | same |
 | Context | 262k | **262k native, 500k with YaRN** | same |
@@ -230,7 +230,7 @@ KV_DTYPE=fp8_e4m3 YARN=1 CTX=1000000 GPU_MEM=0.80 MODE=hybrid scripts/serve.sh
 | `CTX` | `262144` | Max context. Native is 262144; with `YARN=1` up to `500000` is validated. |
 | `YARN` | `0` | `1` = YaRN rope scaling (factor 4, Qwen's recipe) for `CTX` > 262144. |
 | `SEQS` | `8` | Max concurrent sequences. **Do not benchmark with 1–2**: excess requests queue silently and aggregate tok/s flatlines (see below). |
-| `GPU_MEM` | `0.85` | Fraction of the 128 GB pool for weights+KV. `0.875` got OOM-killed on a 300k-token prefill with MTP; for long-running service we run `0.80`, because after a day at `0.85` the box drifted into swap. Right after stopping another big container the first boot can fail with "13.5 GiB KV cache is needed, larger than available" — memory not yet released; the `unless-stopped` retry succeeds. |
+| `GPU_MEM` | `0.85` | Fraction of the 128 GB pool for weights+KV. **For long-running service use `0.80`** (as in the Quickstart): `0.875` got OOM-killed on a 300k-token prefill with MTP, and after a day at `0.85` the box drifted into swap. The lower you set it, the more RAM the page cache has for the 48 GiB table — which is what your prefill speed depends on (below). Right after stopping another big container the first boot can fail with "13.5 GiB KV cache is needed, larger than available" — memory not yet released; the `unless-stopped` retry succeeds. |
 | `MTP` | `2` | Speculative tokens from the model's MTP head (`0` = off). |
 | `KV_DTYPE` | `auto` | `auto` = bf16 (recommended). `fp8_e4m3` = ~1.9× KV pool, 1M context on one box, at −10% decode / −30% prefill and a measurable quality cost — see [fp8 KV cache](#optional-fp8-kv-cache-1m-context) before using it. |
 | `PREWARM` | `0` | `1` streams the 48 GiB table once at boot to warm the page cache — steadier first-request latency, ~10 s extra startup. |
