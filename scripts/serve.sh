@@ -53,6 +53,8 @@
 #   EXTRA=            extra vllm flags passed verbatim
 #   DOCKER_EXTRA=     extra docker run args passed verbatim (e.g. --cap-add=SYS_PTRACE for py-spy,
 #                     -v to bind-mount an instrumented file over the image's copy)
+#   DETACH=1          0 = run the container in the foreground with --restart no, so an
+#                     external supervisor owns the lifecycle (see systemd/qwen38-flash.service)
 #   COMPILE_CACHE=    where to keep vLLM's compiled graphs and FlashInfer's JIT modules across
 #                     boots. Unset (default) = inside the container, which this script recreates
 #                     every time, so they are rebuilt on every boot (80 s of init engine, see
@@ -88,6 +90,7 @@ PROM_MULTIPROC="${PROM_MULTIPROC:-0}"
 PREWARM="${PREWARM:-0}"
 EXTRA="${EXTRA:-}"
 COMPILE_CACHE="${COMPILE_CACHE:-}"
+DETACH="${DETACH:-1}"
 
 # Resolve the local snapshot directory and map it to the in-container mount.
 REPO_DIR="$HF_CACHE/hub/models--${MODEL//\//--}"
@@ -266,11 +269,20 @@ case "$COMPILE_CACHE" in
                 -v "${COMPILE_CACHE}-flashinfer:/root/.cache/flashinfer") ;;
 esac
 
+# Detached: docker restarts it (unless-stopped). Foreground: whoever runs this script
+# (systemd) is the supervisor, so docker must not also restart it, and the script
+# blocks until the container exits.
+RUN_FLAGS=(-d --restart unless-stopped)
+if [ "$DETACH" = 0 ]; then
+  RUN_FLAGS=(--restart no)
+  echo ">> $NAME starting in the foreground on :$PORT (mode=$MODE, ctx $CTX, yarn=$YARN, mtp=$MTP, seqs=$SEQS, prefix_cache=$PREFIX_CACHE, det_topk=$DET_TOPK, exact_topk=$EXACT_TOPK, draft_vocab=$DRAFT_VOCAB, fast_rows=$FAST_ROWS, effort_alias=$EFFORT_ALIAS_STATE${COMPILE_CACHE:+, compile_cache=$COMPILE_CACHE})"
+fi
+
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 # If docker run itself fails (port already bound, ...) do not leave a Created container behind.
 trap 'rc=$?; [ $rc -ne 0 ] && docker rm -f "$NAME" >/dev/null 2>&1; exit $rc' EXIT
 # shellcheck disable=SC2086
-docker run -d --name "$NAME" --restart unless-stopped \
+docker run "${RUN_FLAGS[@]}" --name "$NAME" \
   --gpus all --ipc=host --shm-size 16g -p "${PORT}:8000" \
   -v "$HF_CACHE:/hf" -e HF_HOME=/hf -e HF_HUB_OFFLINE=1 \
   "${PROM_ARGS[@]}" \
@@ -291,6 +303,7 @@ docker run -d --name "$NAME" --restart unless-stopped \
     --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3 \
     "${TEMPLATE_ARGS[@]}" "${SPEC[@]}"
 
+[ "$DETACH" = 0 ] && exit 0   # foreground: only reached once the container has exited
 # Fail loudly instead of printing a success line over a dead container: give vLLM a few
 # seconds to parse its arguments, then check the state (the status word only — the string
 # also carries the exit code and the OOM flag for the message).
