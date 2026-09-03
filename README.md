@@ -450,6 +450,13 @@ curl http://localhost:18300/v1/chat/completions -H 'Content-Type: application/js
 262k context; `YARN=1 CTX=500000` goes to 500k (validated with a needle-in-a-haystack at 414k
 tokens); `GPU_MEM=0.80` is the long-running-service setting, see [Tuning](#tuning-env-vars-for-scriptsservesh).
 
+Run it as a systemd service instead (starts on boot, restarts on crash, `journalctl -u qwen38-flash -f`):
+
+```bash
+$EDITOR systemd/qwen38-flash.env         # same vars as serve.sh
+systemd/install.sh && sudo systemctl start qwen38-flash
+```
+
 ## Two checkpoint modes: NVFP4 or hybrid
 
 `scripts/serve.sh` serves one of two layouts of the same NVFP4 checkpoint (NVIDIA's by default,
