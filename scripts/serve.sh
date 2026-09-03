@@ -43,6 +43,8 @@
 #                     attention block size, which mamba page parity pins to 1600
 #                     on this model -- the connector aborts otherwise
 #   EXTRA=            extra vllm flags passed verbatim
+#   DETACH=1          0 = run the container in the foreground with --restart no, so an
+#                     external supervisor owns the lifecycle (see systemd/qwen38-flash.service)
 #   IMAGE=qwen38-flash-dgx   MODEL=RadixArk/Qwen3.8-Flash-Next-NVFP4
 set -euo pipefail
 
@@ -62,6 +64,7 @@ MTP="${MTP:-2}"
 KV_DTYPE="${KV_DTYPE:-auto}"
 PREWARM="${PREWARM:-0}"
 EXTRA="${EXTRA:-}"
+DETACH="${DETACH:-1}"
 LMCACHE="${LMCACHE:-0}"
 LMC_PORT="${LMC_PORT:-5557}"
 LMC_HTTP_PORT="${LMC_HTTP_PORT:-8090}"
@@ -149,9 +152,18 @@ if [ "$LMCACHE" != 0 ]; then
   LMC_ARGS=(--kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"lmcache.mp.host\":\"host.docker.internal\",\"lmcache.mp.port\":$LMC_PORT,\"lmcache.mp.mp_transfer_mode\":\"engine_driven\"}}")
 fi
 
+# Detached: docker restarts it (unless-stopped). Foreground: whoever runs this script
+# (systemd) is the supervisor, so docker must not also restart it, and the script
+# blocks until the container exits.
+RUN_FLAGS=(-d --restart unless-stopped)
+if [ "$DETACH" = 0 ]; then
+  RUN_FLAGS=(--restart no)
+  echo ">> $NAME starting in the foreground on :$PORT (mode=$MODE, ctx $CTX, yarn=$YARN, mtp=$MTP, seqs=$SEQS, prefix_cache=$PREFIX_CACHE, exact_topk=$EXACT_TOPK, lmcache=$LMCACHE)"
+fi
+
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 # shellcheck disable=SC2086
-docker run -d --name "$NAME" --restart unless-stopped \
+docker run "${RUN_FLAGS[@]}" --name "$NAME" \
   --gpus all --ipc=host --shm-size 16g -p "${PORT}:8000" \
   -v "$HF_CACHE:/hf" -e HF_HOME=/hf -e HF_HUB_OFFLINE=1 \
   -e VLLM_PLE_MMAP=1 -e VLLM_PLE_MMAP_WORKERS="${WORKERS:-32}" -e VLLM_PLE_MMAP_PREWARM="$PREWARM" \
@@ -171,6 +183,7 @@ docker run -d --name "$NAME" --restart unless-stopped \
     --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3 \
     "${SPEC[@]}"
 
+[ "$DETACH" = 0 ] && exit 0   # foreground: only reached once the container has exited
 echo ">> $NAME starting on :$PORT (model 'qwen3.8-flash-next', mode=$MODE, ctx $CTX, yarn=$YARN, mtp=$MTP, seqs=$SEQS, prefix_cache=$PREFIX_CACHE, exact_topk=$EXACT_TOPK, lmcache=$LMCACHE)"
 echo ">> first boot loads ~76 GiB of weights (~8-13 min). Follow:  docker logs -f $NAME"
 echo ">> ready when the log says 'Application startup complete'. Then: scripts/smoke-test.sh"

@@ -119,6 +119,13 @@ curl http://localhost:18300/v1/chat/completions -H 'Content-Type: application/js
 YARN=1 CTX=500000 GPU_MEM=0.80 scripts/serve.sh
 ```
 
+Run it as a systemd service instead (starts on boot, restarts on crash, `journalctl -u qwen38-flash -f`):
+
+```bash
+$EDITOR systemd/qwen38-flash.env         # same vars as serve.sh
+systemd/install.sh && sudo systemctl start qwen38-flash
+```
+
 ## Two checkpoint modes: NVFP4 or hybrid
 
 `scripts/serve.sh` serves one of two layouts of the same RadixArk NVFP4 checkpoint;
