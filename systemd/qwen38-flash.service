@@ -1,0 +1,36 @@
+# Qwen3.8-Flash-Next on DGX Spark, supervised by systemd.
+# Installed by systemd/install.sh, which fills in @USER@ and @REPO@.
+#
+# The container runs in the foreground (DETACH=0) with --restart no, so systemd is
+# the single supervisor: it restarts on crash and on the documented first-boot
+# "KV cache is needed, larger than available" race after another big container
+# was stopped. Tunables live in systemd/qwen38-flash.env (same vars as serve.sh).
+#
+#   sudo systemctl start|stop|restart qwen38-flash
+#   journalctl -u qwen38-flash -f          # same stream as docker logs -f qwen38-flash
+
+[Unit]
+Description=Qwen3.8-Flash-Next vLLM server (qwen38-flash)
+Documentation=file://@REPO@/README.md
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+# Weights take ~8-13 min to load and RestartSec paces retries; never hit the start-rate limit.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@REPO@
+EnvironmentFile=@REPO@/systemd/qwen38-flash.env
+Environment=DETACH=0
+ExecStart=@REPO@/scripts/serve.sh
+# Graceful shutdown: let vLLM drain in-flight requests before the SIGKILL.
+ExecStop=/usr/bin/docker stop -t 120 qwen38-flash
+TimeoutStopSec=150
+KillMode=mixed
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target
