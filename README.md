@@ -270,22 +270,24 @@ to `qwen38-flash` and `18300`, like `serve.sh`.
 - The base image is multi-arch, so `docker build` also works on x86 Blackwell
   (sm_120, e.g. RTX PRO 6000) for testing, though this is tuned for the Spark.
 
-**Download speed.** `scripts/download-weights.sh` disables the Xet backend, because it
-stalled on some Spark setups. That is a stability choice, not a speed one, and on a fast
-link it costs a lot: `--max-workers` parallelises across *files*, so a checkpoint that is
-a dozen large shards leaves most of a gigabit idle. Measured on a DGX Spark on gigabit
-fibre, pulling 81 GB:
+**Download speed.** `scripts/download-weights.sh` uses the Hugging Face Xet backend (`XET=1`,
+the default). It used to be off because it stalled on some Spark setups, but the Hub now
+refuses to serve files over 50 GB through the plain path at all — the NVIDIA checkpoint's PLE
+table is one 50 GiB shard, and the error it prints ("install hf_xet") is misleading, hf_xet is
+in the image. Xet is also much faster: `--max-workers` parallelises across *files*, so a
+checkpoint that is a dozen large shards leaves most of a gigabit idle over plain HTTPS.
+Measured by [@techfury90](https://github.com/techfury90) on a DGX Spark on gigabit fibre,
+pulling 81 GB (we saw the same ~105 MB/s on ours):
 
 | | rate | 81 GB takes |
 |---|---|---|
 | plain HTTPS, 8 workers (default) | 14.7 MB/s (117 Mbit/s) | ~92 min |
 | `XET=1` | **101 MB/s (809 Mbit/s)** | **13.4 min** |
 
-`XET=1` opts back in, and Xet-backed repos are the ones whose API tree entries carry an
-`xetHash`. It stays off by default because that run still ended in an `httpx.ReadTimeout`
-*after* the last file completed — every blob was intact, but the exit code was non-zero,
-so anything that trusts it will think the download failed. Re-run to confirm; it is
-resumable, and a finished download re-checks in seconds.
+`XET=0` falls back to plain HTTPS if Xet stalls for you. One caveat seen once: a Xet run
+ended in an `httpx.ReadTimeout` *after* the last file completed — every blob was intact, but
+the exit code was non-zero. Re-run to confirm; it is resumable, and a finished download
+re-checks in seconds. `./flash doctor` also tells you if a shard named by the index is missing.
 
 ## Quickstart
 

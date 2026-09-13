@@ -7,7 +7,7 @@
 #   MODEL=<org/name> scripts/download-weights.sh   # some other checkpoint
 #   MODEL=<org/name> EXCLUDE='glob1 glob2' scripts/download-weights.sh
 #   MAX_WORKERS=24 scripts/download-weights.sh     # more parallel connections
-#   XET=1 scripts/download-weights.sh              # Xet backend (see the caution below)
+#   XET=0 scripts/download-weights.sh              # plain HTTPS instead of Xet (see below)
 #
 # EXCLUDE takes space-separated globs and skips those files -- for a checkpoint
 # where you already have an equivalent copy of one large shard, or do not intend to
@@ -16,8 +16,12 @@
 # the index still names it, so whatever consumes the checkpoint has to be told
 # where those tensors live instead.
 #
-# XET=1 turns the Xet backend back on. It is OFF by default because it stalled on some
-# Spark setups -- that is the reason for HF_HUB_DISABLE_XET below, not a speed judgement.
+# XET=1 (the default since 2026-09-13) uses the Xet backend; XET=0 falls back to plain HTTPS.
+# Xet used to be off because it stalled on some Spark setups, but the Hub now refuses to
+# serve files over 50 GB through the plain path at all (the NVIDIA checkpoint's PLE table is a
+# single 50 GiB shard, and the error it prints -- "install hf_xet" -- is misleading: hf_xet is
+# in the image, HF_HUB_DISABLE_XET=1 was what blocked it). Measured here on a DGX Spark:
+# ~105 MB/s with Xet against ~15 MB/s without, two clean exits. If Xet stalls for you, XET=0.
 # On a fast link the difference is large: --max-workers only parallelises across *files*,
 # so a checkpoint of a dozen large shards leaves most of a gigabit idle over plain HTTPS,
 # while Xet issues concurrent ranged reads *within* each file. Measured here on a DGX
@@ -51,7 +55,7 @@ IMAGE="${IMAGE:-qwen38-flash-dgx}"          # or the upstream image; only needs 
 HF_CACHE="${HF_CACHE:-$HOME/.cache/huggingface}"
 EXCLUDE="${EXCLUDE:-}"
 MAX_WORKERS="${MAX_WORKERS:-8}"
-XET="${XET:-0}"
+XET="${XET:-1}"
 mkdir -p "$HF_CACHE"
 
 # One --exclude per glob. Patterns must not contain spaces (filenames don't).
@@ -72,10 +76,9 @@ else
 fi
 
 echo ">> downloading $MODEL into $HF_CACHE (resumable, $MAX_WORKERS workers)${EXCLUDE:+, excluding: $EXCLUDE}"
-# HF_HUB_DISABLE_XET=1: the Xet backend stalled on some Spark setups; plain HTTPS is
-# reliable, but on a fast link it leaves most of it idle -- see XET=1 above.
-XET_ENV=(-e HF_HUB_DISABLE_XET=1)
-[ "$XET" = 1 ] && XET_ENV=(-e HF_HUB_DISABLE_XET=0 -e HF_XET_HIGH_PERFORMANCE=1)
+# Xet by default (files over 50 GB need it); XET=0 = HF_HUB_DISABLE_XET=1, plain HTTPS.
+XET_ENV=(-e HF_HUB_DISABLE_XET=0 -e HF_XET_HIGH_PERFORMANCE=1)
+[ "$XET" = 0 ] && XET_ENV=(-e HF_HUB_DISABLE_XET=1)
 docker run --rm --name qwen38-dl \
   -e HF_HOME=/hf "${XET_ENV[@]}" \
   "${TOKEN_ARGS[@]}" \
