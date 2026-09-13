@@ -148,3 +148,9 @@ RUN python3 /tmp/fp8_m4pad_patch.py && rm /tmp/fp8_m4pad_patch.py \
 COPY src/patch_mtp_draft_vocab.py /tmp/patch_mtp_draft_vocab.py
 COPY src/draft_vocab_65536.npy /opt/llm/draft_vocab_65536.npy
 RUN python3 /tmp/patch_mtp_draft_vocab.py ${SP}/vllm/models/qwen3_8_flash_next/nvidia/mtp.py && rm /tmp/patch_mtp_draft_vocab.py
+
+# --- 11. FP8_BLOCK_SCALES layers in ModelOpt MIXED_PRECISION checkpoints (NVIDIA's own NVFP4 checkpoint
+#        quantizes the MTP experts that way; vLLM's mixed-precision config does not know the algo) ---
+COPY src/vllm_modelopt_block_moe.py ${SP}/vllm_modelopt_block_moe.py
+RUN printf '\n\n# --- qwen38-flash-dgx: FP8_BLOCK_SCALES support for ModelOpt MIXED_PRECISION (VLLM_MODELOPT_BLOCK_MOE=0 disables) ---\nfrom vllm_modelopt_block_moe import apply as _block_moe_apply\n_block_moe_apply()\n' >> ${MO} \
+ && python3 -c "import ast; ast.parse(open('${MO}').read()); print('modelopt.py block-moe hooked OK')"

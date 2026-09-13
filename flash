@@ -89,7 +89,19 @@ snapshot_dir() {
   done
   ls -dt "$repo"/snapshots/*/ 2>/dev/null | grep -v -- '-fp8hybrid' | head -1 | sed 's:/$::' || true
 }
-have_weights()  { local s; s="$(snapshot_dir)"; [ -n "$s" ] && [ -f "$s/config.json" ] && [ -f "$s/model.safetensors.index.json" ]; }
+# Present = config + index + EVERY shard the index names (a download interrupted on one file leaves a
+# dangling symlink; the HF cache still looks complete at a glance).
+have_weights()  { local s; s="$(snapshot_dir)"; [ -n "$s" ] && [ -f "$s/config.json" ] && [ -f "$s/model.safetensors.index.json" ] && [ -z "$(missing_shards "$s")" ]; }
+missing_shards() { python3 - "$1" <<'PY' 2>/dev/null
+import json, os, sys
+s = sys.argv[1]
+try:
+    wm = json.load(open(os.path.join(s, "model.safetensors.index.json")))["weight_map"]
+except Exception:
+    sys.exit(0)
+print(" ".join(sorted(f for f in set(wm.values()) if not os.path.exists(os.path.join(s, f)))))
+PY
+}
 have_hybrid()   { local s; s="$(snapshot_dir)"; [ -n "$s" ] && [ -f "${s}-fp8hybrid/.prepared" ]; }
 have_graft()    { local s; s="$(snapshot_dir)"; [ -n "$s" ] && [ -f "${s}-fp8hybrid-mtpnvfp4/.prepared" ]; }
 have_image()    { docker image inspect "$IMAGE" >/dev/null 2>&1; }
@@ -156,7 +168,8 @@ cmd_doctor() {
   mkdir -p "$HF_CACHE" 2>/dev/null || true
   local free; free="$(gib_free_at "$HF_CACHE")"
   if have_weights; then ok "checkpoint present: $(snapshot_dir)"; else
-    info "checkpoint not downloaded yet (126 GiB)"
+    local sdir miss; sdir="$(snapshot_dir)"; miss="$( [ -n "$sdir" ] && missing_shards "$sdir" )"
+    if [ -n "$miss" ]; then warn "checkpoint INCOMPLETE, missing shard(s): $miss — re-run scripts/download-weights.sh (resumable)"; else info "checkpoint not downloaded yet (126 GiB)"; fi
     if [ "${free:-0}" -ge 140 ]; then ok "${free} GB free on that filesystem (140 needed)"; else fail "${free:-?} GB free on that filesystem, 140 needed for the download"; fi
   fi
   case "$MODE" in

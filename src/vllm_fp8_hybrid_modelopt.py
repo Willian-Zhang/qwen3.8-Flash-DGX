@@ -32,14 +32,20 @@ def _enabled() -> bool:
 
 
 def apply() -> None:
+    """Patch every ModelOpt config class a checkpoint of this family can resolve to:
+    ``ModelOptNvFp4Config`` (quant_algo NVFP4: RadixArk, Inferact) and
+    ``ModelOptMixedPrecisionConfig`` (quant_algo MIXED_PRECISION: NVIDIA's own checkpoint,
+    whose exclude list would otherwise send the fp8-converted side layers to the bf16 path)."""
     if not _enabled():
         return
     from vllm.model_executor.layers.quantization import modelopt as m
 
-    cfg_cls = m.ModelOptNvFp4Config
-    if getattr(cfg_cls, _SENTINEL, False):
-        return
+    for cfg_cls in (m.ModelOptNvFp4Config, getattr(m, "ModelOptMixedPrecisionConfig", None)):
+        if cfg_cls is not None and not getattr(cfg_cls, _SENTINEL, False):
+            _patch(cfg_cls)
 
+
+def _patch(cfg_cls) -> None:
     from vllm.model_executor.layers.linear import LinearBase
     from vllm.model_executor.layers.quantization.fp8 import Fp8Config
     from vllm.transformers_utils.config import get_safetensors_params_metadata
@@ -119,7 +125,7 @@ def apply() -> None:
     cfg_cls._is_fp8_layer = _is_fp8_layer
     cfg_cls.get_quant_method = get_quant_method
     setattr(cfg_cls, _SENTINEL, True)
-    logger.info("fp8 hybrid patch applied to ModelOptNvFp4Config")
+    logger.info("fp8 hybrid patch applied to %s", cfg_cls.__name__)
 
 
 # ---------------------------------------------------------------------------
