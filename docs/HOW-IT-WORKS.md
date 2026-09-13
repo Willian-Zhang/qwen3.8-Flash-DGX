@@ -527,6 +527,27 @@ port took and what it measures.
 - **7 (fp8 KV on the QSA path) is not ported yet.** The QSA Triton kernels moved and were
   edited upstream; the patch needs a re-derivation, not a path change. `scripts/serve.sh`
   refuses `KV_DTYPE≠auto` on this base rather than silently running bf16.
+- **11 differs by base; on this one it is a backport of vllm#55513.** NVIDIA's own checkpoint
+  needs it for MTP: the drafter's experts are blockwise fp8 under a mixed-precision config, and
+  v0.29.0 misses them in two ways (see
+  [NVIDIA's NVFP4 checkpoint](#nvidias-nvfp4-checkpoint-block-fp8-mtp-experts-under-a-mixed-precision-config-patch-11-temporary)).
+  `src/patch_block_fp8_mtp.py` applies the PR's two runtime changes. The draft config now moves
+  `quantized_layers` to the drafter's runtime index, as it already did `exclude_modules`, and the
+  mixed config sends `FP8_PB_WO` / `FP8_BLOCK_SCALES` experts to vLLM's own `Fp8MoEMethod` with a
+  block `Fp8Config`. It leaves out the PR's `has_blocked_weights` hunk: v0.29.0's mixed config has
+  no such method, and that gate only picks the CUDA `QuantFP8` op for speed, while the MoE path
+  quantizes its input with `per_token_group_quant_fp8` directly. RadixArk's checkpoint (quant_algo
+  `NVFP4`, no `quantized_layers`) is unaffected. The preview image keeps the FP8_BLOCK_SCALES shim.
+  Measured on a DGX Spark with an NVIDIA-base checkpoint (`MODE=nvfp4`, MTP=2):
+  - the draft experts load on vLLM's DeepGEMM FP8 MoE backend;
+  - draft acceptance is 70.9% over four greedy prompts (539 of 760 drafted tokens, identical on two builds);
+  - the KV pool is 517k–542k tokens at `GPU_MEM=0.80` across three boots;
+  - the smoke test's determinism and prefix-cache checks pass.
+
+  The hybrid layout works on it too. With `prepare-hybrid.sh`'s fp8 side layers (`MODE=hybrid`, which
+  sets `VLLM_USE_DEEP_GEMM=0`), the draft experts load on the Triton FP8 MoE backend and the KV pool
+  grows to 658,980 tokens. Draft acceptance on the same four prompts is 65.9% (382 of 580 drafted
+  tokens; the fp8 side layers change the greedy paths), and the smoke test passes.
 
 **Serving.** The splitting-op list changes names (`vllm::qwen4_exp_ple_short_conv`,
 `vllm::qwen4_exp_qsa_with_output`, and `vllm::qwen4_exp_compute_ple_ngram_ids` must be in
@@ -575,21 +596,25 @@ offset but not `quantized_layers`), and even with the name matched there is no m
 algorithm. The layer is created unquantized (bf16 parameters) and weight loading dies with
 `Layer mtp.layers.48.mlp.experts has no parameter 'w2_weight_scale_inv'`.
 
-`src/vllm_modelopt_block_moe.py` fixes both at the layer: it hooks
-`RoutedExperts._get_quant_method`, reads `quantized_layers` from the served checkpoint,
+`src/vllm_modelopt_block_moe.py`, the shim the preview image still uses, fixes both at the layer:
+it hooks `RoutedExperts._get_quant_method`, reads `quantized_layers` from the served checkpoint,
 matches the drafter's entry by its tail (`.mlp.experts`) under either spelling of the index,
 and returns vLLM's own `Fp8MoEMethod` with `Fp8Config(weight_block_size=[128, 128])` — the
 same method DeepSeek-V3 checkpoints use. (A first version hooked the config class only; in
-practice the expert layer never reached it, hence the layer-level hook.) vLLM picked the
-DeepGEMM fp8 MoE backend for it on GB10 and it works: drafter acceptance 83–89%, decode
-27.7 tok/s on the published layout and 34.0 on the hybrid, deterministic, needle 6/6 to 413k.
+practice the expert layer never reached it, hence the layer-level hook.) On the v0.29 base,
+before the backport below replaced it there, vLLM picked the DeepGEMM fp8 MoE backend for it on
+GB10 and it works: drafter acceptance 83–89%, decode 27.7 tok/s on the published layout and
+34.0 on the hybrid, deterministic, needle 6/6 to 413k. The shim is inert for checkpoints without
+`FP8_BLOCK_SCALES` layers, and `VLLM_MODELOPT_BLOCK_MOE=0` disables it.
 
-**This shim is a stopgap, not the fix.** The proper fix landed upstream as vllm#55513 (merged
-2026-09-08, after the 0.29 release): a `quantized_layers` remap in the MTP and a block-fp8 MoE
-branch in the mixed config, at the source of both gaps. @techfury90 is backporting it as a
-build-time patch (with a CPU test); when that PR lands it replaces this shim on the v0.29 image
-and the shim is removed there. Inert for checkpoints without `FP8_BLOCK_SCALES` layers;
-`VLLM_MODELOPT_BLOCK_MOE=0` disables it.
+**On the preview image this shim is still a stopgap, not the fix.** The proper fix landed upstream
+as vllm#55513 (merged 2026-09-08, after the 0.29 release, and not yet in a release): a
+`quantized_layers` remap in the MTP and a block-fp8 MoE branch in the mixed config, at the source of
+both gaps. The v0.29 image carries a backport of it instead of the shim (patch 11 on that base,
+`src/patch_block_fp8_mtp.py`, by @techfury90, with a CPU test; see
+[the v0.29 port](#the-vllm-v0290-port-dockerfilev029)), and the shim is removed there. With the index
+remapped where it goes wrong, the expert layer reaches the config's method, so that base needs no
+layer-level hook.
 
 The hybrid layout needed one more change: `vllm_fp8_hybrid_modelopt.py` used to patch only
 `ModelOptNvFp4Config`; on the mixed config the fp8-converted side layers were caught by the

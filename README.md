@@ -71,9 +71,9 @@ Newest first. If you cloned this before, this is the short version; details in t
 - **`nvidia/Qwen3.8-Flash-Next-NVFP4` is supported** (issue #17, [@PathosEthosLogos](https://github.com/PathosEthosLogos)).
   Same recipe, `MODEL=nvidia/Qwen3.8-Flash-Next-NVFP4`; the hybrid layout works on it unchanged. It needed
   patch 11 (its MTP drafter's experts are blockwise fp8 under a ModelOpt *mixed-precision* config that
-  vLLM 0.29 does not know how to load) and the hybrid shim extended to that config class. **Patch 11 is a
-  stopgap**: vLLM fixed this upstream (vllm#55513) and a backport of that fix is on its way as a PR from
-  @techfury90; it will replace the shim on the v0.29 image. Measured against
+  vLLM 0.29 does not know how to load) and the hybrid shim extended to that config class. Patch 11 started
+  as a stopgap shim; on the v0.29 image it is now a backport of vLLM's own fix (vllm#55513, by
+  @techfury90), and only the preview image keeps the shim. Measured against
   RadixArk at equal recipe: **quality at parity, needle 6/6 on both up to 413k, decode 34.0 vs 36.4 tok/s,
   KV pool +22–28% (721k tokens)**. The default stays RadixArk; take NVIDIA if you want the KV room.
   → [Other checkpoints](#other-checkpoints-nvidias-nvfp4-and-derivatives)
@@ -601,6 +601,7 @@ What changes in the patch set:
 | 6 hybrid dispatch, 10 reduced draft vocabulary | needed | needed, re-targeted |
 | 7 fp8 KV cache | opt-in | **not ported yet** — `KV_DTYPE` must stay `auto`, serve.sh refuses otherwise |
 | 9 `M%4` padding | opt-in | **in the release (vllm#52775), dropped**; `PAD_M4` is a no-op there |
+| 11 block-FP8 MTP experts in mixed ModelOpt checkpoints | FP8_BLOCK_SCALES shim (`src/vllm_modelopt_block_moe.py`) | **vllm#55513 backported** in place of the shim: NVIDIA-base checkpoints can use MTP; a no-op for RadixArk's |
 
 Two things got simpler on the release: the Inductor int64-indexing assert that forced
 `torch.compile` off on the preview image is gone (compile is on, graphs stay PIECEWISE
@@ -639,15 +640,15 @@ table, bf16 side layers): `MODEL=<org/name>` on `download-weights.sh` and `serve
 - **[nvidia/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4)** — NVIDIA's
   own quantization (issue #17). Same experts, same PLE table, same bf16 side layers, but a ModelOpt
   *mixed-precision* config and an MTP drafter whose experts are **blockwise fp8** instead of bf16. Two
-  things were needed: the 50 GiB PLE shard only downloads through Xet (now the default), and patch 11
-  (`src/vllm_modelopt_block_moe.py`): vLLM 0.29's mixed-precision config has no method for
-  `FP8_BLOCK_SCALES`, so the drafter's experts came out unquantized and loading died on the missing
-  `w2_weight_scale_inv`; the shim routes those layers to vLLM's own block-fp8 MoE method. **This is a
-  temporary workaround, not the fix**: vLLM corrected it upstream in vllm#55513 (in the release after
-  0.29), and a backport of that patch is coming as a PR from @techfury90; when it lands it replaces the
-  shim on the v0.29 image (the shim then only matters for the preview image, if at all).
-  `prepare-hybrid.sh` works on it unchanged
-  (the 300 side tensors are the same weights as RadixArk's, down to the conversion error).
+  things were needed: the 50 GiB PLE shard only downloads through Xet (now the default), and patch 11.
+  vLLM 0.29's mixed-precision config has no method for those experts and looks them up under the
+  wrong layer index, so they came out unquantized and loading died on the missing
+  `w2_weight_scale_inv`. vLLM fixed this upstream in vllm#55513 (on vLLM `main`, not yet in a
+  release). The v0.29 image carries a backport of that fix (`src/patch_block_fp8_mtp.py`, by
+  @techfury90), which replaced the temporary shim there; the preview image keeps the shim, which
+  routes those layers to vLLM's own block-fp8 MoE method (`src/vllm_modelopt_block_moe.py`).
+  `prepare-hybrid.sh` works on it unchanged (the 300 side tensors are the same weights as RadixArk's,
+  down to the conversion error).
 
 ```bash
 MODEL=nvidia/Qwen3.8-Flash-Next-NVFP4 scripts/download-weights.sh          # 124 GiB, Xet
@@ -882,7 +883,7 @@ Details: [results-radixark-vllm.md](https://github.com/jschmied/qwen38-flash-nex
 flash                             one-command front-end: doctor / setup / serve <profile> / wait / test / status …
 profiles/*.env                    named recipes for it (default, speed, context, context-1m, shared, published, native, v0.29)
 Dockerfile                        official vLLM Flash-Next preview image + the patches below (default)
-Dockerfile.v0.29                  same recipe on the vLLM v0.29.0 release (patches 3 and 9 dropped, 7 not ported)
+Dockerfile.v0.29                  same recipe on the vLLM v0.29.0 release (patches 3 and 9 dropped, 7 not ported, 11 is the vllm#55513 backport)
 src/vllm_ple_mmap.py              1. mmap PLE table (opaque splitting op)            VLLM_PLE_MMAP=1
                                      handles both layouts (preview forward_impl hook / v0.29 embedding swap)
 src/mamba_utils_guarded.py        3. vllm#50729 + bounds guard (drop-in mamba_utils.py)
@@ -894,14 +895,16 @@ src/patch_qsa_exact_topk.py       5. exact, deterministic QSA top-k             
                                      pinned commit) — hybrid mode with prefix caching off
 src/patch_mtp_draft_vocab.py     10. reduced draft vocabulary for the MTP drafter          VLLM_MTP_DRAFT_VOCAB=<ids.npy>
 src/draft_vocab_65536.npy            the default 65,536-id set (tools/build_draft_vocab.py rebuilds it)
+src/patch_block_fp8_mtp.py       11. vllm#55513 backport: block-FP8 MTP experts in ModelOpt mixed checkpoints (v0.29 base)
 src/vllm_fp8_hybrid_modelopt.py   6. NVFP4 experts + fp8 side layers dispatch        VLLM_FP8_HYBRID=1
                                      (patches the NVFP4 and the mixed-precision ModelOpt config classes)
 src/vllm_modelopt_block_moe.py   11. FP8_BLOCK_SCALES layers in ModelOpt mixed checkpoints (NVIDIA's MTP
-                                     experts) -> vLLM's block-fp8 MoE method. TEMPORARY: to be replaced
-                                     by a backport of vllm#55513 (PR pending)             VLLM_MODELOPT_BLOCK_MOE=0 disables
+                                     experts) -> vLLM's block-fp8 MoE method. Preview base only; the v0.29
+                                     image uses the vllm#55513 backport instead           VLLM_MODELOPT_BLOCK_MOE=0 disables
 src/patch_qsa_fp8_kv.py           7. fp8_e4m3 KV cache on the QSA path (by @Nanetnounou) --kv-cache-dtype fp8_e4m3
 src/test_ple_mmap_cpu.py          CPU unit test for the gather (no GPU needed)
 src/test_qsa_exact_topk_cpu.py    CPU unit test for the exact top-k (no GPU needed)
+src/test_block_fp8_mtp_cpu.py     CPU unit test for the vllm#55513 backport (no GPU needed; v0.29 image)
 tools/fp8_convert.py              side-layer bf16 -> blockwise fp8 (by @Saren-Arterius)
 scripts/download-weights.sh       MODEL, EXCLUDE, MAX_WORKERS, XET
 scripts/prepare-hybrid.sh         one-time: build the -fp8hybrid snapshot
@@ -918,6 +921,7 @@ Run the unit tests (no GPU):
 ```bash
 docker run --rm -v "$PWD/src:/t" -w /t --entrypoint python3 qwen38-flash-dgx test_ple_mmap_cpu.py
 docker run --rm -v "$PWD/src:/t" -w /t --entrypoint python3 qwen38-flash-dgx test_qsa_exact_topk_cpu.py
+docker run --rm -v "$PWD/src:/t" -w /t --entrypoint python3 qwen38-flash-dgx:v0.29 test_block_fp8_mtp_cpu.py
 ```
 
 ## Limitations & notes
