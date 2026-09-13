@@ -46,6 +46,10 @@
 #   PREWARM=0         1 = stream the 48 GiB table once at boot to warm the page cache
 #   WORKERS=32        threads for the mmap gather
 #   EXTRA=            extra vllm flags passed verbatim
+#   COMPILE_CACHE=    where to keep vLLM's compiled graphs and FlashInfer's JIT modules across
+#                     boots. Unset (default) = inside the container, which this script recreates
+#                     every time, so they are rebuilt on every boot (80 s of init engine, see
+#                     README). A bare name becomes docker volumes, an absolute path binds dirs
 #   IMAGE=qwen38-flash-dgx   MODEL=RadixArk/Qwen3.8-Flash-Next-NVFP4
 #   BASE=             preview|v0.29 — normally read from the image label (Dockerfile vs Dockerfile.v0.29).
 #                     On v0.29: KV_DTYPE must stay auto (fp8 KV not ported), PAD_M4 is a no-op.
@@ -74,6 +78,7 @@ KV_CACHE_MEM="${KV_CACHE_MEM:-}"
 PROM_MULTIPROC="${PROM_MULTIPROC:-0}"
 PREWARM="${PREWARM:-0}"
 EXTRA="${EXTRA:-}"
+COMPILE_CACHE="${COMPILE_CACHE:-}"
 
 # Resolve the local snapshot directory and map it to the in-container mount.
 REPO_DIR="$HF_CACHE/hub/models--${MODEL//\//--}"
@@ -171,6 +176,18 @@ PC_ARG=--no-enable-prefix-caching
 # prometheus_client does not export in multiprocess mode. That is why it is off
 # by default: it changes what existing dashboards see.
 PROM_ARGS=(); [ "$PROM_MULTIPROC" = 1 ] && PROM_ARGS=(--tmpfs /tmp/vllm-prometheus:rw,size=256m -e PROMETHEUS_MULTIPROC_DIR=/tmp/vllm-prometheus)
+# Both are keyed by a hash of the model and the engine config, so one pair is safe to
+# share across profiles: a different recipe lands in a different entry. /root/.triton is
+# deliberately not persisted — measured at 0.2 s, below CUDA-graph capture noise.
+CACHE_MNT=()
+case "$COMPILE_CACHE" in
+  "") ;;
+  /*) CACHE_MNT=(-v "$COMPILE_CACHE/vllm:/root/.cache/vllm"
+                -v "$COMPILE_CACHE/flashinfer:/root/.cache/flashinfer") ;;
+  *)  CACHE_MNT=(-v "${COMPILE_CACHE}-vllm:/root/.cache/vllm"
+                -v "${COMPILE_CACHE}-flashinfer:/root/.cache/flashinfer") ;;
+esac
+
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 # If docker run itself fails (port already bound, ...) do not leave a Created container behind.
 trap 'rc=$?; [ $rc -ne 0 ] && docker rm -f "$NAME" >/dev/null 2>&1; exit $rc' EXIT
@@ -179,6 +196,7 @@ docker run -d --name "$NAME" --restart unless-stopped \
   --gpus all --ipc=host --shm-size 16g -p "${PORT}:8000" \
   -v "$HF_CACHE:/hf" -e HF_HOME=/hf -e HF_HUB_OFFLINE=1 \
   "${PROM_ARGS[@]}" \
+  "${CACHE_MNT[@]}" \
   -e VLLM_PLE_MMAP=1 -e VLLM_PLE_MMAP_WORKERS="${WORKERS:-32}" -e VLLM_PLE_MMAP_PREWARM="$PREWARM" \
   -e VLLM_QSA_EXACT_TOPK="$EXACT_TOPK" "${DETENV[@]}" -e VLLM_FP8_PAD_M4="$PAD_M4" \
   -e VLLM_USE_FLASHINFER_SAMPLER=1 -e VLLM_ALLOW_LONG_MAX_MODEL_LEN="$ALLOW_LONG" \
@@ -210,6 +228,6 @@ case "$STATE" in
     ;;
 esac
 
-echo ">> $NAME starting on :$PORT (model 'qwen3.8-flash-next', mode=$MODE, ctx $CTX, yarn=$YARN, mtp=$MTP, seqs=$SEQS, prefix_cache=$PREFIX_CACHE, det_topk=$DET_TOPK, exact_topk=$EXACT_TOPK, pad_m4=$PAD_M4, draft_vocab=$DRAFT_VOCAB, madvise=$MADVISE)"
+echo ">> $NAME starting on :$PORT (model 'qwen3.8-flash-next', mode=$MODE, ctx $CTX, yarn=$YARN, mtp=$MTP, seqs=$SEQS, prefix_cache=$PREFIX_CACHE, det_topk=$DET_TOPK, exact_topk=$EXACT_TOPK, pad_m4=$PAD_M4, draft_vocab=$DRAFT_VOCAB, madvise=$MADVISE${COMPILE_CACHE:+, compile_cache=$COMPILE_CACHE})"
 echo ">> first boot loads ~76 GiB of weights (~8-13 min). Follow:  docker logs -f $NAME"
 echo ">> ready when the log says 'Application startup complete'. Then: scripts/smoke-test.sh"
