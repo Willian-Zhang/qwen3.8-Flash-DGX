@@ -560,7 +560,7 @@ not investigated. The preview `Dockerfile` stays the default and our production 
 now; `Dockerfile.v0.29` is the tested path onto the release line, and will become the
 default once fp8 KV is ported and it has run in production for a while.
 
-## NVIDIA's NVFP4 checkpoint: block-fp8 MTP experts under a mixed-precision config (patch 11)
+## NVIDIA's NVFP4 checkpoint: block-fp8 MTP experts under a mixed-precision config (patch 11, temporary)
 
 `nvidia/Qwen3.8-Flash-Next-NVFP4` declares `quant_algo: MIXED_PRECISION` with a per-layer map:
 the routed experts are NVFP4 (as in RadixArk), the PLE table is FP8, and the MTP drafter's
@@ -584,10 +584,11 @@ practice the expert layer never reached it, hence the layer-level hook.) vLLM pi
 DeepGEMM fp8 MoE backend for it on GB10 and it works: drafter acceptance 83–89%, decode
 27.7 tok/s on the published layout and 34.0 on the hybrid, deterministic, needle 6/6 to 413k.
 
-The same fix landed upstream as vllm#55513 (merged 2026-09-08, after the 0.29 release): a
-`quantized_layers` remap in the MTP and a block-fp8 MoE branch in the mixed config.
-@techfury90 is backporting it as a build-time patch; when that lands it replaces this shim on
-the v0.29 image. Inert for checkpoints without `FP8_BLOCK_SCALES` layers;
+**This shim is a stopgap, not the fix.** The proper fix landed upstream as vllm#55513 (merged
+2026-09-08, after the 0.29 release): a `quantized_layers` remap in the MTP and a block-fp8 MoE
+branch in the mixed config, at the source of both gaps. @techfury90 is backporting it as a
+build-time patch (with a CPU test); when that PR lands it replaces this shim on the v0.29 image
+and the shim is removed there. Inert for checkpoints without `FP8_BLOCK_SCALES` layers;
 `VLLM_MODELOPT_BLOCK_MOE=0` disables it.
 
 The hybrid layout needed one more change: `vllm_fp8_hybrid_modelopt.py` used to patch only

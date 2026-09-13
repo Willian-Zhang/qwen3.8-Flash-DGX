@@ -71,7 +71,9 @@ Newest first. If you cloned this before, this is the short version; details in t
 - **`nvidia/Qwen3.8-Flash-Next-NVFP4` is supported** (issue #17, [@PathosEthosLogos](https://github.com/PathosEthosLogos)).
   Same recipe, `MODEL=nvidia/Qwen3.8-Flash-Next-NVFP4`; the hybrid layout works on it unchanged. It needed
   patch 11 (its MTP drafter's experts are blockwise fp8 under a ModelOpt *mixed-precision* config that
-  vLLM 0.29 does not know how to load) and the hybrid shim extended to that config class. Measured against
+  vLLM 0.29 does not know how to load) and the hybrid shim extended to that config class. **Patch 11 is a
+  stopgap**: vLLM fixed this upstream (vllm#55513) and a backport of that fix is on its way as a PR from
+  @techfury90; it will replace the shim on the v0.29 image. Measured against
   RadixArk at equal recipe: **quality at parity, needle 6/6 on both up to 413k, decode 34.0 vs 36.4 tok/s,
   KV pool +22–28% (721k tokens)**. The default stays RadixArk; take NVIDIA if you want the KV room.
   → [Other checkpoints](#other-checkpoints-nvidias-nvfp4-and-derivatives)
@@ -640,9 +642,11 @@ table, bf16 side layers): `MODEL=<org/name>` on `download-weights.sh` and `serve
   things were needed: the 50 GiB PLE shard only downloads through Xet (now the default), and patch 11
   (`src/vllm_modelopt_block_moe.py`): vLLM 0.29's mixed-precision config has no method for
   `FP8_BLOCK_SCALES`, so the drafter's experts came out unquantized and loading died on the missing
-  `w2_weight_scale_inv`; the shim routes those layers to vLLM's own block-fp8 MoE method. vLLM fixed
-  this upstream in vllm#55513 (in the release after 0.29); @techfury90 is backporting that fix, which
-  will replace the shim on the v0.29 image when it lands. `prepare-hybrid.sh` works on it unchanged
+  `w2_weight_scale_inv`; the shim routes those layers to vLLM's own block-fp8 MoE method. **This is a
+  temporary workaround, not the fix**: vLLM corrected it upstream in vllm#55513 (in the release after
+  0.29), and a backport of that patch is coming as a PR from @techfury90; when it lands it replaces the
+  shim on the v0.29 image (the shim then only matters for the preview image, if at all).
+  `prepare-hybrid.sh` works on it unchanged
   (the 300 side tensors are the same weights as RadixArk's, down to the conversion error).
 
 ```bash
@@ -893,7 +897,8 @@ src/draft_vocab_65536.npy            the default 65,536-id set (tools/build_draf
 src/vllm_fp8_hybrid_modelopt.py   6. NVFP4 experts + fp8 side layers dispatch        VLLM_FP8_HYBRID=1
                                      (patches the NVFP4 and the mixed-precision ModelOpt config classes)
 src/vllm_modelopt_block_moe.py   11. FP8_BLOCK_SCALES layers in ModelOpt mixed checkpoints (NVIDIA's MTP
-                                     experts) -> vLLM's block-fp8 MoE method                 VLLM_MODELOPT_BLOCK_MOE=0 disables
+                                     experts) -> vLLM's block-fp8 MoE method. TEMPORARY: to be replaced
+                                     by a backport of vllm#55513 (PR pending)             VLLM_MODELOPT_BLOCK_MOE=0 disables
 src/patch_qsa_fp8_kv.py           7. fp8_e4m3 KV cache on the QSA path (by @Nanetnounou) --kv-cache-dtype fp8_e4m3
 src/test_ple_mmap_cpu.py          CPU unit test for the gather (no GPU needed)
 src/test_qsa_exact_topk_cpu.py    CPU unit test for the exact top-k (no GPU needed)
