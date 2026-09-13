@@ -62,9 +62,30 @@ Everything below is the long version: what was broken on GB10, what was fixed, a
 > [issue #1](https://github.com/blazux/qwen3.8-Flash-DGX/issues/1) and their
 > [write-up](https://github.com/jschmied/qwen38-flash-next-gb10).
 
-## Update 2026-09-11 — what changed
+## Update 2026-09-13 — what changed
 
 Newest first. If you cloned this before, this is the short version; details in the linked sections.
+
+**2026-09-13** — NVIDIA's own NVFP4 checkpoint runs on the recipe, and three contributed options:
+
+- **`nvidia/Qwen3.8-Flash-Next-NVFP4` is supported** (issue #17, [@PathosEthosLogos](https://github.com/PathosEthosLogos)).
+  Same recipe, `MODEL=nvidia/Qwen3.8-Flash-Next-NVFP4`; the hybrid layout works on it unchanged. It needed
+  patch 11 (its MTP drafter's experts are blockwise fp8 under a ModelOpt *mixed-precision* config that
+  vLLM 0.29 does not know how to load) and the hybrid shim extended to that config class. Measured against
+  RadixArk at equal recipe: **quality at parity, needle 6/6 on both up to 413k, decode 34.0 vs 36.4 tok/s,
+  KV pool +22–28% (721k tokens)**. The default stays RadixArk; take NVIDIA if you want the KV room.
+  → [Other checkpoints](#other-checkpoints-nvidias-nvfp4-and-derivatives)
+- **Download knobs, PLE counters, `KV_CACHE_MEM`** — [@techfury90](https://github.com/techfury90)'s PR #19:
+  `XET`/`EXCLUDE`/`MAX_WORKERS` for `download-weights.sh`, five `vllm:ple_mmap_*` Prometheus counters
+  (opt-in export with `PROM_MULTIPROC=1`), and `KV_CACHE_MEM` for an explicit KV budget. All verified live.
+  We flipped **Xet on by default** right after: the Hub no longer serves files over 50 GB through the plain
+  path, and NVIDIA's PLE table is one 50 GiB shard. → [Watching the mmapped table](#watching-the-mmapped-table-vllmple_mmap_)
+- **`COMPILE_CACHE`** — [@AronRubin](https://github.com/AronRubin)'s PR #21 keeps vLLM's compiled graphs in
+  docker volumes across boots: **init engine 122 s → 41 s** on our box (compilation 34 s → 0.5 s), outputs
+  identical. Opt-in; worth it whenever something recreates the container for you.
+  → [Persistent compile cache](#optional-persistent-compile-cache-compile_cache)
+- `./flash doctor` now reports a checkpoint as **incomplete** when a shard named by the index is missing
+  (an interrupted download leaves dangling symlinks and everything looks present).
 
 **2026-09-12** — one command for newcomers, nothing removed for everyone else:
 
@@ -605,6 +626,51 @@ boot-to-boot range of the preview image). **The preview `Dockerfile` remains the
 field time on our own box; if you want to be on the release line, it is ready and tested.
 Full port notes in [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md#the-vllm-v0290-port-dockerfilev029).
 
+## Other checkpoints: NVIDIA's NVFP4 and derivatives
+
+The recipe is checkpoint-agnostic as long as the layout matches (NVFP4 routed experts, fp8 PLE
+table, bf16 side layers): `MODEL=<org/name>` on `download-weights.sh` and `serve.sh` (or a
+`K=V` on `./flash serve`). Two families are tested:
+
+- **[RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4)** — the
+  default, everything above was measured on it.
+- **[nvidia/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4)** — NVIDIA's
+  own quantization (issue #17). Same experts, same PLE table, same bf16 side layers, but a ModelOpt
+  *mixed-precision* config and an MTP drafter whose experts are **blockwise fp8** instead of bf16. Two
+  things were needed: the 50 GiB PLE shard only downloads through Xet (now the default), and patch 11
+  (`src/vllm_modelopt_block_moe.py`): vLLM 0.29's mixed-precision config has no method for
+  `FP8_BLOCK_SCALES`, so the drafter's experts came out unquantized and loading died on the missing
+  `w2_weight_scale_inv`; the shim routes those layers to vLLM's own block-fp8 MoE method. vLLM fixed
+  this upstream in vllm#55513 (in the release after 0.29); @techfury90 is backporting that fix, which
+  will replace the shim on the v0.29 image when it lands. `prepare-hybrid.sh` works on it unchanged
+  (the 300 side tensors are the same weights as RadixArk's, down to the conversion error).
+
+```bash
+MODEL=nvidia/Qwen3.8-Flash-Next-NVFP4 scripts/download-weights.sh          # 124 GiB, Xet
+MODEL=nvidia/Qwen3.8-Flash-Next-NVFP4 scripts/prepare-hybrid.sh            # optional, ~2 min here
+MODEL=nvidia/Qwen3.8-Flash-Next-NVFP4 MODE=hybrid YARN=1 CTX=500000 scripts/serve.sh
+```
+
+Measured on our GX10, v0.29 base, identical settings (YaRN 500k, deterministic top-k, reduced draft
+vocabulary, prefix caching), same day:
+
+| | RadixArk hybrid + MTP=2 (default) | NVIDIA hybrid + MTP=2 | NVIDIA as published + MTP=2 |
+|---|---|---|---|
+| agentic tournament (43 scenarios) | 91.1% ± 1.8 (3 runs) | 90.7% (1 run) | 88.7% ± 1.1 (3 runs) |
+| needle, 92k → 413k, two seeds | 6/6 | 6/6 | 8/8 |
+| deterministic at temperature 0 | yes | yes | yes |
+| decode, single stream | 36.4 tok/s | 34.0 tok/s | 27.7 tok/s |
+| prefill 8k / 32k | 2,529 / 3,026 tok/s | 2,511 / 2,988 | 2,459 / 3,108 |
+| KV pool @500k, `GPU_MEM=0.80` | ~580k tokens | **721k tokens** | 565k |
+| draft acceptance | 85–90% | 83% | 89% |
+
+Reading: parity on quality and long context (the long-context regression reported for RadixArk did not
+reproduce here), a few percent slower decode, and a real KV advantage because the fp8 drafter is
+lighter. The default stays RadixArk; NVIDIA is the one to pick for concurrency or context. Derivatives
+of either checkpoint (abliterated variants such as `Jiunsong/SuperQwen3.8-Flash-Next-abliterated-NVFP4-DGX-Spark`
+or `drowzeys/keys-Qwen3.8-Flash-Next-NVFP4-dual-ablit-house-qsa-L3-47`) run with the same commands; we
+do not ship or endorse them, we only note that the recipe does not care.
+
 ## Tuning (env vars for `scripts/serve.sh`)
 
 | Var | Default | Notes |
@@ -825,6 +891,9 @@ src/patch_qsa_exact_topk.py       5. exact, deterministic QSA top-k             
 src/patch_mtp_draft_vocab.py     10. reduced draft vocabulary for the MTP drafter          VLLM_MTP_DRAFT_VOCAB=<ids.npy>
 src/draft_vocab_65536.npy            the default 65,536-id set (tools/build_draft_vocab.py rebuilds it)
 src/vllm_fp8_hybrid_modelopt.py   6. NVFP4 experts + fp8 side layers dispatch        VLLM_FP8_HYBRID=1
+                                     (patches the NVFP4 and the mixed-precision ModelOpt config classes)
+src/vllm_modelopt_block_moe.py   11. FP8_BLOCK_SCALES layers in ModelOpt mixed checkpoints (NVIDIA's MTP
+                                     experts) -> vLLM's block-fp8 MoE method                 VLLM_MODELOPT_BLOCK_MOE=0 disables
 src/patch_qsa_fp8_kv.py           7. fp8_e4m3 KV cache on the QSA path (by @Nanetnounou) --kv-cache-dtype fp8_e4m3
 src/test_ple_mmap_cpu.py          CPU unit test for the gather (no GPU needed)
 src/test_qsa_exact_topk_cpu.py    CPU unit test for the exact top-k (no GPU needed)
@@ -868,6 +937,10 @@ docker run --rm -v "$PWD/src:/t" -w /t --entrypoint python3 qwen38-flash-dgx tes
 
 ## Credits
 
+- Download knobs (Xet, `EXCLUDE`, `MAX_WORKERS`), the `vllm:ple_mmap_*` Prometheus counters and `KV_CACHE_MEM`:
+  **[@techfury90](https://github.com/techfury90)** (PR #19); also spotted the upstream fix for NVIDIA's fp8 MTP experts (vllm#55513).
+- `COMPILE_CACHE`, the persistent compile cache: **[@AronRubin](https://github.com/AronRubin)** (PR #21).
+- The pointer to NVIDIA's own NVFP4 checkpoint: **[@PathosEthosLogos](https://github.com/PathosEthosLogos)** (issue #17).
 - `tools/vllm_watch.py`, the live session viewer: **[@0x3dlux](https://github.com/0x3dlux)** (issue #12).
 - The nudge to port the recipe to the vLLM v0.29.0 release: **[@ChengYen-Tang](https://github.com/ChengYen-Tang)** (issue #14).
 
