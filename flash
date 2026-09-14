@@ -89,20 +89,27 @@ snapshot_dir() {
   done
   ls -dt "$repo"/snapshots/*/ 2>/dev/null | grep -v -- '-fp8hybrid' | head -1 | sed 's:/$::' || true
 }
-# Present = config + index + EVERY shard the index names (a download interrupted on one file leaves a
-# dangling symlink; the HF cache still looks complete at a glance).
-have_weights()  { local s; s="$(snapshot_dir)"; [ -n "$s" ] && [ -f "$s/config.json" ] && [ -f "$s/model.safetensors.index.json" ] && [ -z "$(missing_shards "$s")" ]; }
-missing_shards() { python3 - "$1" <<'PY' 2>/dev/null
+# Present = the essential files + EVERY shard the index names (a download interrupted on one file leaves a
+# dangling symlink or no tokenizer.json; the HF cache still looks complete at a glance — issue #17).
+ESSENTIAL_FILES="config.json generation_config.json hf_quant_config.json tokenizer.json tokenizer_config.json chat_template.jinja preprocessor_config.json model.safetensors.index.json"
+have_weights()  { local s; s="$(snapshot_dir)"; [ -n "$s" ] && [ -z "$(missing_files "$s" shards)" ]; }
+missing_files() { python3 - "$1" "${2:-}" "$ESSENTIAL_FILES" <<'PY' 2>/dev/null
 import json, os, sys
-s = sys.argv[1]
-try:
-    wm = json.load(open(os.path.join(s, "model.safetensors.index.json")))["weight_map"]
-except Exception:
-    sys.exit(0)
-print(" ".join(sorted(f for f in set(wm.values()) if not os.path.exists(os.path.join(s, f)))))
+d, shards, ess = sys.argv[1], sys.argv[2], sys.argv[3].split()
+miss = [f for f in ess if not os.path.exists(os.path.join(d, f))]
+if shards and "model.safetensors.index.json" not in miss:
+    try:
+        wm = json.load(open(os.path.join(d, "model.safetensors.index.json")))["weight_map"]
+        miss += sorted(f for f in set(wm.values()) if not os.path.exists(os.path.join(d, f)))
+    except Exception:
+        miss.append("model.safetensors.index.json(unreadable)")
+print(" ".join(miss))
 PY
 }
 have_hybrid()   { local s; s="$(snapshot_dir)"; [ -n "$s" ] && [ -f "${s}-fp8hybrid/.prepared" ]; }
+# A hybrid layout prepared from an incomplete download misses files the snapshot has since gained;
+# scripts/prepare-hybrid.sh repairs it (issue #17).
+hybrid_stale()  { local s; s="$(snapshot_dir)"; [ -n "$s" ] && missing_files "${s}-fp8hybrid"; }
 have_graft()    { local s; s="$(snapshot_dir)"; [ -n "$s" ] && [ -f "${s}-fp8hybrid-mtpnvfp4/.prepared" ]; }
 have_image()    { docker image inspect "$IMAGE" >/dev/null 2>&1; }
 image_base()    { docker image inspect -f '{{index .Config.Labels "qwen38.base"}}' "$IMAGE" 2>/dev/null || true; }
@@ -168,13 +175,16 @@ cmd_doctor() {
   mkdir -p "$HF_CACHE" 2>/dev/null || true
   local free; free="$(gib_free_at "$HF_CACHE")"
   if have_weights; then ok "checkpoint present: $(snapshot_dir)"; else
-    local sdir miss; sdir="$(snapshot_dir)"; miss="$( [ -n "$sdir" ] && missing_shards "$sdir" )"
-    if [ -n "$miss" ]; then warn "checkpoint INCOMPLETE, missing shard(s): $miss — re-run scripts/download-weights.sh (resumable)"; else info "checkpoint not downloaded yet (126 GiB)"; fi
+    local sdir miss; sdir="$(snapshot_dir)"; miss="$( [ -n "$sdir" ] && missing_files "$sdir" shards )"
+    if [ -n "$miss" ]; then warn "checkpoint INCOMPLETE, missing or dangling: $miss — re-run scripts/download-weights.sh (resumable), and prepare-hybrid.sh only after that"; else info "checkpoint not downloaded yet (126 GiB)"; fi
     if [ "${free:-0}" -ge 140 ]; then ok "${free} GB free on that filesystem (140 needed)"; else fail "${free:-?} GB free on that filesystem, 140 needed for the download"; fi
   fi
   case "$MODE" in
     hybrid|hybrid-mtp)
-      if have_hybrid; then ok "hybrid checkpoint prepared (-fp8hybrid)"; else
+      if have_hybrid; then
+        local stale; stale="$(hybrid_stale)"
+        if [ -n "$stale" ]; then warn "hybrid layout prepared from an INCOMPLETE download, missing: $stale — run scripts/prepare-hybrid.sh again, it repairs it (issue #17)"; else ok "hybrid checkpoint prepared (-fp8hybrid)"; fi
+      else
         info "hybrid checkpoint not prepared yet (one-time, ~10 min, +13 GB)"; [ "${free:-0}" -ge 15 ] || fail "${free:-?} GB free, 15 needed for prepare-hybrid"; fi ;;
   esac
   if [ "$MODE" = hybrid-mtp ]; then
@@ -232,7 +242,8 @@ cmd_serve() {
   [ -n "${EXTRA:-}" ] && printf '%s  EXTRA=%s%s\n' "$c_dim" "$EXTRA" "$c_off" || true
   have_image || die "$IMAGE is not built — run: ./flash setup $profile"
   have_weights || die "weights not downloaded — run: ./flash setup $profile"
-  case "$MODE" in hybrid|hybrid-mtp) have_hybrid || die "hybrid checkpoint not prepared — run: ./flash setup $profile" ;; esac
+  case "$MODE" in hybrid|hybrid-mtp) have_hybrid || die "hybrid checkpoint not prepared — run: ./flash setup $profile"
+    local stale; stale="$(hybrid_stale)"; [ -z "$stale" ] || die "hybrid layout is missing $stale (prepared from an incomplete download, issue #17) — run scripts/prepare-hybrid.sh again, it repairs it" ;; esac
   [ "$MODE" = hybrid-mtp ] && { have_graft || die "MTP graft not prepared — run: ./flash setup $profile"; }
   local b; b="$(image_base)"
   [ -n "$b" ] && [ "$b" != "$BASE_EXPECTED" ] && die "$IMAGE is a '$b'-base image, profile '$profile' expects '$BASE_EXPECTED' — run: ./flash setup $profile"

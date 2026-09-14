@@ -311,7 +311,15 @@ pulling 81 GB (we saw the same ~105 MB/s on ours):
 `XET=0` falls back to plain HTTPS if Xet stalls for you. One caveat seen once: a Xet run
 ended in an `httpx.ReadTimeout` *after* the last file completed — every blob was intact, but
 the exit code was non-zero. Re-run to confirm; it is resumable, and a finished download
-re-checks in seconds. `./flash doctor` also tells you if a shard named by the index is missing.
+re-checks in seconds. `./flash doctor` tells you if an essential file (tokenizer, configs) or a
+shard named by the index is missing.
+
+**Do not run `prepare-hybrid.sh` on an unfinished download.** The hybrid layout is a copy of the
+snapshot as it is at that moment; prepared too early it lacked `tokenizer.json`, and vLLM then died
+on *"Couldn't instantiate the backend tokenizer… sentencepiece"* (issue #17 — nothing is missing
+from the image). Since 2026-09-14 the script refuses an incomplete snapshot and, run again on an
+existing layout, repairs it by adding whatever the snapshot has gained; `serve.sh` and `flash`
+check the layout too and print that fix instead of vLLM's message.
 
 ## Quickstart
 

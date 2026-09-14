@@ -34,7 +34,49 @@ DST="$REPO_DIR/snapshots/${SNAP_NAME}-fp8hybrid"
 SRC_IN="/hf/hub/models--${MODEL//\//--}/snapshots/${SNAP_NAME}"
 DST_IN="${SRC_IN}-fp8hybrid"
 
-if [ -f "$DST/.prepared" ]; then echo ">> already prepared: $DST"; exit 0; fi
+# The hybrid directory is a copy of the snapshot AS IT IS NOW. A download that stopped early (this
+# checkpoint is 24 files, one of them 50 GiB; Xet sometimes ends on a ReadTimeout) leaves a snapshot
+# without tokenizer.json or a shard, and a hybrid layout prepared from it stays incomplete forever:
+# vLLM then fails on "Couldn't instantiate the backend tokenizer ... sentencepiece" (issue #17).
+# So: refuse an incomplete snapshot, and when the layout already exists, repair it instead of exiting.
+ESSENTIAL="config.json generation_config.json hf_quant_config.json tokenizer.json tokenizer_config.json chat_template.jinja preprocessor_config.json model.safetensors.index.json"
+missing_in() {  # <dir> [shards] -> names of essential files (and, with 'shards', of index shards) missing or dangling
+  python3 - "$1" "${2:-}" "$ESSENTIAL" <<'PY'
+import json, os, sys
+d, shards, ess = sys.argv[1], sys.argv[2], sys.argv[3].split()
+miss = [f for f in ess if not os.path.exists(os.path.join(d, f))]
+if shards and "model.safetensors.index.json" not in miss:
+    try:
+        wm = json.load(open(os.path.join(d, "model.safetensors.index.json")))["weight_map"]
+        miss += sorted(f for f in set(wm.values()) if not os.path.exists(os.path.join(d, f)))
+    except Exception as e:
+        miss.append(f"model.safetensors.index.json(unreadable: {e})")
+print(" ".join(miss))
+PY
+}
+MISS="$(missing_in "$SNAP_HOST" shards)"
+if [ -n "$MISS" ]; then
+  echo "!! snapshot INCOMPLETE, missing or dangling: $MISS"
+  echo "   re-run scripts/download-weights.sh (resumable, re-checks in seconds), then this script again"
+  exit 1
+fi
+
+if [ -f "$DST/.prepared" ]; then
+  STALE="$(missing_in "$DST")"
+  if [ -z "$STALE" ]; then echo ">> already prepared: $DST"; exit 0; fi
+  echo ">> already prepared but missing $STALE (prepared from an incomplete download) — repairing from the snapshot"
+  docker run --rm --name qwen38-fp8repair -v "$HF_CACHE:/hf" --entrypoint bash "$IMAGE" -c "
+set -euo pipefail
+for f in '$SRC_IN'/*; do
+  b=\$(basename \"\$f\")
+  case \"\$b\" in *.safetensors|model.safetensors.index.json) continue ;; esac
+  [ -e '$DST_IN'/\"\$b\" ] || { cp -a \"\$f\" '$DST_IN'/; echo \"   + \$b\"; }
+done"
+  STALE="$(missing_in "$DST")"
+  [ -z "$STALE" ] || { echo "!! still missing after repair: $STALE"; exit 1; }
+  echo ">> repaired: $DST"
+  exit 0
+fi
 
 echo ">> preparing $DST (relative symlinks + 4 shards converted to blockwise fp8, ~10 min)"
 docker run --rm --name qwen38-fp8convert \
