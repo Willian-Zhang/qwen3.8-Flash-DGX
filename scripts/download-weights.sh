@@ -3,7 +3,8 @@
 # Resumable — safe to re-run if the connection drops, and safe to interrupt: partial
 # blobs are kept as .incomplete and resumed where they left off.
 #
-#   scripts/download-weights.sh                    # the default NVFP4 checkpoint (~126 GiB, 135 GB)
+#   scripts/download-weights.sh                    # the default checkpoint, nvidia/Qwen3.8-Flash-Next-NVFP4 (~124 GiB, Xet)
+#   MODEL=RadixArk/Qwen3.8-Flash-Next-NVFP4 scripts/download-weights.sh   # the previous default (~122 GiB, 418 files)
 #   MODEL=<org/name> scripts/download-weights.sh   # some other checkpoint
 #   MODEL=<org/name> EXCLUDE='glob1 glob2' scripts/download-weights.sh
 #   MAX_WORKERS=24 scripts/download-weights.sh     # more parallel connections
@@ -50,7 +51,7 @@
 # mounted into the container, so it is picked up without exporting HF_TOKEN.
 set -euo pipefail
 
-MODEL="${MODEL:-RadixArk/Qwen3.8-Flash-Next-NVFP4}"
+MODEL="${MODEL:-nvidia/Qwen3.8-Flash-Next-NVFP4}"   # default since 2026-09-14; see README "Checkpoints"
 IMAGE="${IMAGE:-qwen38-flash-dgx}"          # or the upstream image; only needs `hf`
 HF_CACHE="${HF_CACHE:-$HOME/.cache/huggingface}"
 EXCLUDE="${EXCLUDE:-}"

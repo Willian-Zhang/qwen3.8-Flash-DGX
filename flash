@@ -21,7 +21,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROFILES_DIR="$HERE/profiles"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/qwen38-flash"
-MODEL_DEFAULT="RadixArk/Qwen3.8-Flash-Next-NVFP4"
+MODEL_DEFAULT="nvidia/Qwen3.8-Flash-Next-NVFP4"   # default since 2026-09-14 (README: Checkpoints); RadixArk/Qwen3.8-Flash-Next-NVFP4 still supported
 DRY="${DRY:-0}"
 
 # ---------------------------------------------------------------- helpers
@@ -214,7 +214,7 @@ cmd_setup() {
     [ -f "$HERE/$DOCKERFILE" ] || die "$DOCKERFILE not found in $HERE"
     run docker build -f "$HERE/$DOCKERFILE" -t "$IMAGE" "$HERE"; ok "built"; fi
 
-  step "2/4 weights ($MODEL, 126 GiB, resumable)"
+  step "2/4 weights ($MODEL, ~124 GiB, resumable)"
   if have_weights; then ok "already downloaded: $(snapshot_dir)"; else
     run env IMAGE="$IMAGE" MODEL="$MODEL" HF_CACHE="$HF_CACHE" "$HERE/scripts/download-weights.sh"; ok "downloaded"; fi
 
@@ -244,7 +244,7 @@ cmd_serve() {
   have_weights || die "weights not downloaded — run: ./flash setup $profile"
   case "$MODE" in hybrid|hybrid-mtp) have_hybrid || die "hybrid checkpoint not prepared — run: ./flash setup $profile"
     local stale; stale="$(hybrid_stale)"; [ -z "$stale" ] || die "hybrid layout is missing $stale (prepared from an incomplete download, issue #17) — run scripts/prepare-hybrid.sh again, it repairs it" ;; esac
-  [ "$MODE" = hybrid-mtp ] && { have_graft || die "MTP graft not prepared — run: ./flash setup $profile"; }
+  [ "$MODE" = hybrid-mtp ] && { case "$MODEL" in RadixArk/*) ;; *) die "MODE=hybrid-mtp (the NVFP4 draft-experts graft) only applies to RadixArk/Qwen3.8-Flash-Next-NVFP4, whose MTP drafter is bf16; $MODEL already ships an fp8 drafter — use MODE=hybrid" ;; esac; have_graft || die "MTP graft not prepared — run: ./flash setup $profile"; }
   local b; b="$(image_base)"
   [ -n "$b" ] && [ "$b" != "$BASE_EXPECTED" ] && die "$IMAGE is a '$b'-base image, profile '$profile' expects '$BASE_EXPECTED' — run: ./flash setup $profile"
   if [ "$(container_state)" = running ]; then info "$NAME is running and will be replaced"; fi
@@ -257,7 +257,7 @@ cmd_wait() {
   load_defaults_only
   local t0 deadline last="" state
   t0=$(date +%s); deadline=$((t0 + ${TIMEOUT:-1800}))
-  echo "waiting for $NAME on :$PORT (first boot loads ~76 GiB: 8-13 min; ctrl-c is safe, the server keeps loading)"
+  echo "waiting for $NAME on :$PORT (first boot loads ~75 GiB: 8-13 min; ctrl-c is safe, the server keeps loading)"
   while :; do
     state="$(container_state)"
     case "$state" in

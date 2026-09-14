@@ -50,14 +50,14 @@
 #                     boots. Unset (default) = inside the container, which this script recreates
 #                     every time, so they are rebuilt on every boot (80 s of init engine, see
 #                     README). A bare name becomes docker volumes, an absolute path binds dirs
-#   IMAGE=qwen38-flash-dgx   MODEL=RadixArk/Qwen3.8-Flash-Next-NVFP4
+#   IMAGE=qwen38-flash-dgx   MODEL=nvidia/Qwen3.8-Flash-Next-NVFP4   (RadixArk/Qwen3.8-Flash-Next-NVFP4 still supported: MODEL=...)
 #   BASE=             preview|v0.29 — normally read from the image label (Dockerfile vs Dockerfile.v0.29).
 #                     On v0.29: KV_DTYPE must stay auto (fp8 KV not ported), PAD_M4 is a no-op.
 set -euo pipefail
 
 NAME="${NAME:-qwen38-flash}"
 IMAGE="${IMAGE:-qwen38-flash-dgx}"
-MODEL="${MODEL:-RadixArk/Qwen3.8-Flash-Next-NVFP4}"
+MODEL="${MODEL:-nvidia/Qwen3.8-Flash-Next-NVFP4}"   # default since 2026-09-14; see README "Checkpoints"
 HF_CACHE="${HF_CACHE:-$HOME/.cache/huggingface}"
 MODE="${MODE:-nvfp4}"
 PREFIX_CACHE="${PREFIX_CACHE:-1}"
@@ -101,7 +101,10 @@ case "$MODE" in
   nvfp4) ;;
   hybrid|hybrid-mtp)
     SUFFIX="-fp8hybrid"
-    [ "$MODE" = hybrid-mtp ] && SUFFIX="-fp8hybrid-mtpnvfp4"
+    if [ "$MODE" = hybrid-mtp ]; then
+      case "$MODEL" in RadixArk/*) ;; *) echo "!! MODE=hybrid-mtp only applies to RadixArk/Qwen3.8-Flash-Next-NVFP4 (bf16 MTP drafter); $MODEL already has an fp8 drafter: use MODE=hybrid"; exit 1 ;; esac
+      SUFFIX="-fp8hybrid-mtpnvfp4"
+    fi
     if [ ! -f "$REPO_DIR/snapshots/${SNAP_NAME}${SUFFIX}/.prepared" ]; then
       [ "$MODE" = hybrid ] && echo "!! hybrid checkpoint not prepared: run scripts/prepare-hybrid.sh first (one-time, ~10 min)" \
         || echo "!! hybrid-mtp checkpoint not prepared: run scripts/prepare-mtp-graft.sh first (needs prepare-hybrid.sh; one-time, ~5 min)"
@@ -235,5 +238,5 @@ case "$STATE" in
 esac
 
 echo ">> $NAME starting on :$PORT (model 'qwen3.8-flash-next', mode=$MODE, ctx $CTX, yarn=$YARN, mtp=$MTP, seqs=$SEQS, prefix_cache=$PREFIX_CACHE, det_topk=$DET_TOPK, exact_topk=$EXACT_TOPK, pad_m4=$PAD_M4, draft_vocab=$DRAFT_VOCAB, madvise=$MADVISE${COMPILE_CACHE:+, compile_cache=$COMPILE_CACHE})"
-echo ">> first boot loads ~76 GiB of weights (~8-13 min). Follow:  docker logs -f $NAME"
+echo ">> first boot loads ~75 GiB of weights (~8-13 min). Follow:  docker logs -f $NAME"
 echo ">> ready when the log says 'Application startup complete'. Then: scripts/smoke-test.sh"

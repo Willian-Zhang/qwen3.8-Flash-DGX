@@ -3,7 +3,7 @@
 ## The memory problem
 
 Qwen3.8-Flash-Next is a sparse MoE with an unusual extra component: a **51B-parameter
-n-gram embedding table** (the paper calls it PLE / "Engram"). The `RadixArk` NVFP4
+n-gram embedding table** (the paper calls it PLE / "Engram"). The NVFP4
 checkpoint breaks down roughly as:
 
 | Component | Format | Size |
@@ -188,7 +188,7 @@ aggregate throughput of ~267 tok/s at 48 streams with page-fault cost per token
 - vLLM recipe: <https://recipes.vllm.ai/Qwen/Qwen3.8-Flash-Next>
 - vLLM PR (Flash-Next support): <https://github.com/vllm-project/vllm/pull/53896>
 - vLLM v0.29.0 release (first official build with the model, as `qwen4_exp`): <https://github.com/vllm-project/vllm/releases/tag/v0.29.0> — see [the port notes](#the-vllm-v0290-port-dockerfilev029)
-- NVFP4 checkpoint: <https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4>
+- NVFP4 checkpoints: <https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4> (the default since 2026-09-14) and <https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4>
 - SGLang day-0 write-up (PLE offload mechanics): <https://www.lmsys.org/blog/2026-08-26-qwen-flash-next>
 
 ## Prefix caching: the root cause and the fix
@@ -348,7 +348,7 @@ reads the file through a separate descriptor and is unaffected.
 
 ## Hybrid mode: NVFP4 experts + blockwise-fp8 side layers
 
-The RadixArk checkpoint quantizes only the routed experts (ModelOpt NVFP4) and leaves
+Both NVFP4 checkpoints (NVIDIA's and RadixArk's) quantize only the routed experts (ModelOpt NVFP4) and leave
 the dense side layers — GDN `in_proj`/`out_proj`, QSA `q/k/v/o_proj`, shared experts,
 ~15 GiB — in bf16. Every decoded token reads all of them, so they set the decode
 bandwidth floor. `scripts/prepare-hybrid.sh` rewrites those 300 tensors as blockwise

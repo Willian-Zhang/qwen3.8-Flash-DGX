@@ -16,7 +16,7 @@
 # @Saren-Arterius (Apache-2.0).
 set -euo pipefail
 
-MODEL="${MODEL:-RadixArk/Qwen3.8-Flash-Next-NVFP4}"
+MODEL="${MODEL:-nvidia/Qwen3.8-Flash-Next-NVFP4}"   # default since 2026-09-14; works unchanged on RadixArk/Qwen3.8-Flash-Next-NVFP4
 IMAGE="${IMAGE:-qwen38-flash-dgx}"
 HF_CACHE="${HF_CACHE:-$HOME/.cache/huggingface}"
 

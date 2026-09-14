@@ -5,11 +5,11 @@ active) — on **one NVIDIA DGX Spark / ASUS GX10** with **vLLM**, at full prefi
 speed, with MTP speculative decoding, **working prefix caching**, **deterministic
 greedy decoding**, and up to **500k tokens of context**.
 
-The catch this repo solves: the NVFP4 checkpoint is **126 GiB**, which does not fit
+The catch this repo solves: the NVFP4 checkpoint is **~125 GiB**, which does not fit
 next to a usable KV cache in the Spark's **128 GB unified pool**. 48 GiB of that is
 the n-gram embedding ("PLE") table — a pure lookup that a token only touches 16 rows
 of. This repo patches the official vLLM image to **serve that table from NVMe via
-`mmap`** instead of keeping it resident. Weights drop to **~76 GiB**, the rest of the
+`mmap`** instead of keeping it resident. Weights drop to **~75 GiB**, the rest of the
 pool goes to KV, and everything runs on stock GB10 kernels.
 
 Along the way it also fixes two things that were broken for this model on GB10 —
@@ -23,9 +23,9 @@ kernel that drops candidates) — and offers an optional **hybrid** checkpoint l
 ```bash
 git clone https://github.com/blazux/qwen3.8-Flash-DGX.git && cd qwen3.8-Flash-DGX
 ./flash doctor      # docker, GPU, memory, disk, port, image, weights: tells you what is missing
-./flash setup       # builds the image, downloads the checkpoint (126 GiB, resumable), prepares the hybrid layout
+./flash setup       # builds the image, downloads the checkpoint (NVIDIA's NVFP4, 124 GiB via Xet, resumable), prepares the hybrid layout
 ./flash serve       # the recommended recipe (profile "default"): hybrid, 500k context, deterministic
-./flash wait        # first boot loads ~76 GiB of weights, 8-13 min; prints the KV pool when the API is up
+./flash wait        # first boot loads ~75 GiB of weights, 8-13 min; prints the KV pool when the API is up
 ./flash test        # health, coherence, prefix-cache hit, determinism, tok/s
 ```
 
@@ -38,7 +38,7 @@ The same thing by hand, unchanged and still supported (everything `flash` does i
 
 ```bash
 docker build -t qwen38-flash-dgx .            # ~1 min: official vLLM image + the 10 patches below
-scripts/download-weights.sh                   # RadixArk NVFP4 checkpoint, ~126 GiB, resumable (one-time)
+scripts/download-weights.sh                   # nvidia/Qwen3.8-Flash-Next-NVFP4, ~124 GiB via Xet, resumable (one-time)
 scripts/prepare-hybrid.sh                     # recommended: fp8 side layers, +20% decode, same quality (~10 min, one-time)
 MODE=hybrid YARN=1 CTX=500000 scripts/serve.sh   # the recipe our own box runs; 500k context, ~13 min to load
 docker logs -f qwen38-flash                   # ready at "Application startup complete"
@@ -48,8 +48,12 @@ scripts/smoke-test.sh                         # health, coherence, prefix-cache 
 OpenAI-compatible API on `http://localhost:18300/v1`, model name `qwen3.8-flash-next`,
 tool calling and reasoning parsers on. Every default is the setting that scored best on our
 agentic tournament (see [How the defaults are chosen](#how-the-defaults-are-chosen-quality-first-speed-as-an-option));
-what you get on a GX10: ~37 tok/s single-stream decode, ~2,500–3,000 tok/s prefill, prefix
-caching, deterministic greedy output, 500k tokens of context. Want the checkpoint exactly as
+what you get on a GX10: ~34 tok/s single-stream decode, ~2,500–2,800 tok/s prefill, a ~680k-token
+KV pool, prefix caching, deterministic greedy output, 500k tokens of context. The checkpoint is
+**NVIDIA's own NVFP4 quantization** since 2026-09-14 (it replaced RadixArk's after a 5-pass head-to-head:
+same or better quality, +15–22% KV, −8% single-stream decode — the whole story is in
+[Checkpoints](#checkpoints-nvidias-nvfp4-default-and-radixarks)); RadixArk's is one variable away,
+`MODEL=RadixArk/Qwen3.8-Flash-Next-NVFP4`, same recipe, same image. Want the checkpoint exactly as
 published? Drop `prepare-hybrid.sh` and `MODE=hybrid`. Want speed over the last percent of
 quality? `MTP=3`, and `MODE=hybrid-mtp` for more KV — both explained in the [options table](#how-the-defaults-are-chosen-quality-first-speed-as-an-option).
 Prefer the current vLLM release to the preview image? `docker build -f Dockerfile.v0.29 -t qwen38-flash-dgx:v0.29 .`
@@ -61,6 +65,29 @@ Everything below is the long version: what was broken on GB10, what was fixed, a
 > [@jschmied](https://github.com/jschmied) — see
 > [issue #1](https://github.com/blazux/qwen3.8-Flash-DGX/issues/1) and their
 > [write-up](https://github.com/jschmied/qwen38-flash-next-gb10).
+
+## Update 2026-09-14 — NVIDIA's checkpoint is the default
+
+- **`MODEL` now defaults to `nvidia/Qwen3.8-Flash-Next-NVFP4`** in `flash`, `serve.sh`, `download-weights.sh`
+  and `prepare-hybrid.sh`. RadixArk's checkpoint, the default until now, stays fully supported:
+  `MODEL=RadixArk/Qwen3.8-Flash-Next-NVFP4` on any of them (or `./flash setup default MODEL=…`), nothing
+  else changes. Already running RadixArk? Nothing breaks: the variable was always honoured, and the
+  recipe, patches and profiles are identical for both.
+- **Why**: a head-to-head on 2026-09-13/14 — same image (`main`), same recipe, only the checkpoint
+  changed, 5 full passes of a 55-scenario agentic tournament per side plus speed, memory, long-context
+  and determinism probes on the same boot. NVIDIA 88.8% ± 1.0 vs RadixArk 86.1% ± 1.9; behind on no
+  scenario beyond one-run noise; reasoning-runaway rate identical; needle 6/6 to 413k and deterministic
+  on both; KV pool +15% on that boot (679k vs 589k tokens, +22% on another); single-stream decode −7 to
+  −8% (34.5 vs 37.1 tok/s), equal under load. The default rule of this repo is quality first: at parity
+  or better, the checkpoint with more KV room and the vendor's own export wins. Numbers, protocol and
+  the honest caveats: [Checkpoints](#checkpoints-nvidias-nvfp4-default-and-radixarks).
+- **What it costs you**: ~3 tok/s of single-stream decode against RadixArk, and a 124 GiB download in
+  24 files, one of them 50 GiB, that only comes through Xet (the default of `download-weights.sh`
+  since PR #19). On the v0.29 image the fp8 MTP drafter loads through the vllm#55513 backport; on the
+  preview image through the stopgap shim — both validated.
+- **`MODE=hybrid-mtp` (the NVFP4 draft-experts graft, profile `context`) is RadixArk-only** and now
+  says so: NVIDIA's drafter is already fp8, which is exactly where its KV advantage comes from. The
+  `context` profile pins `MODEL=RadixArk/…` for that reason.
 
 ## Update 2026-09-13 — what changed
 
@@ -75,8 +102,9 @@ Newest first. If you cloned this before, this is the short version; details in t
   as a stopgap shim; on the v0.29 image it is now a backport of vLLM's own fix (vllm#55513, by
   @techfury90), and only the preview image keeps the shim. Measured against
   RadixArk at equal recipe: **quality at parity, needle 6/6 on both up to 413k, decode 34.0 vs 36.4 tok/s,
-  KV pool +22–28% (721k tokens)**. The default stays RadixArk; take NVIDIA if you want the KV room.
-  → [Other checkpoints](#other-checkpoints-nvidias-nvfp4-and-derivatives)
+  KV pool +22–28% (721k tokens)**. The default stayed RadixArk that day; the 5-pass head-to-head of
+  the next night made NVIDIA the default (see the 2026-09-14 update above).
+  → [Checkpoints](#checkpoints-nvidias-nvfp4-default-and-radixarks)
 - **Download knobs, PLE counters, `KV_CACHE_MEM`** — [@techfury90](https://github.com/techfury90)'s PR #19:
   `XET`/`EXCLUDE`/`MAX_WORKERS` for `download-weights.sh`, five `vllm:ple_mmap_*` Prometheus counters
   (opt-in export with `PROM_MULTIPROC=1`), and `KV_CACHE_MEM` for an explicit KV budget. All verified live.
@@ -224,9 +252,10 @@ full comparison tables are in [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md).*
 
 ## How the defaults are chosen: quality first, speed as an option
 
-Every default in `scripts/serve.sh` is the setting that scored best on our **17-scenario
-agentic tournament** (tool loops, long-context extraction, multi-step reasoning; 3 repeats,
-temperature 0.2), run on the GX10 with one variable changed at a time, on the same day. A
+Every default in `scripts/serve.sh` is the setting that scored best on our **agentic
+tournament** (tool loops, long-context extraction, multi-step reasoning, hidden-test coding;
+17 scenarios when the recipe was built, 55 for the checkpoint decision; 3–5 repeats, temperature
+0.2), run on the GX10 with one variable changed at a time, on the same day. A
 change that only buys tok/s or TTFT and costs even a point there ships as an **option**, off
 by default, with its measured cost next to it. Two runs of the same configuration differ by
 up to 2 points day to day, so anything inside that band is treated as equal and the faster
@@ -234,6 +263,7 @@ one wins; anything below it stays an option.
 
 | what | default | measured effect (GX10, hybrid, MTP=2, prefix caching, YaRN 500k) |
 |---|---|---|
+| Checkpoint (`MODEL`) | **`nvidia/Qwen3.8-Flash-Next-NVFP4`** (since 2026-09-14) | vs RadixArk, 5 × 55 scenarios: 88.8% ± 1.0 vs 86.1% ± 1.9, runaway rate equal, needle and determinism equal; +15–22% KV pool, −8% single-stream decode |
 | Hybrid checkpoint (`MODE=hybrid`) | recommended, `nvfp4` as published is the default | +20% decode, +8% KV, same tournament score |
 | Deterministic top-k kernel (`DET_TOPK=1`) | **on** | identical greedy outputs, full prefill speed, tournament neutral (44/51) |
 | Reduced draft vocabulary (`DRAFT_VOCAB=1`) | **on** | +20% decode, tournament 45/51 (the best run), outputs unchanged by construction |
@@ -340,8 +370,9 @@ tokens); `GPU_MEM=0.80` is the long-running-service setting, see [Tuning](#tunin
 
 ## Two checkpoint modes: NVFP4 or hybrid
 
-`scripts/serve.sh` serves one of two layouts of the same RadixArk NVFP4 checkpoint;
-pick with `MODE=`.
+`scripts/serve.sh` serves one of two layouts of the same NVFP4 checkpoint (NVIDIA's by default,
+RadixArk's with `MODEL=`); pick with `MODE=`. The table below was measured on RadixArk's checkpoint;
+on NVIDIA's the same conversion takes decode from ~28 to ~34 tok/s and the KV pool from ~565k to ~680k.
 
 | | `MODE=nvfp4` (default) | `MODE=hybrid` |
 |---|---|---|
@@ -372,9 +403,11 @@ MODE=hybrid YARN=1 CTX=500000 GPU_MEM=0.80 scripts/serve.sh
 Our own box runs the hybrid. If you want the checkpoint exactly as published, stay on
 `MODE=nvfp4` — you lose ~5 tok/s and nothing else.
 
-### NVFP4 MTP draft experts (`MODE=hybrid-mtp`)
+### NVFP4 MTP draft experts (`MODE=hybrid-mtp`, RadixArk only)
 
-A graft on top of the hybrid: the MTP draft head's routed experts (BF16 fused, ~4.7 GiB)
+**RadixArk only**: NVIDIA's checkpoint already ships its MTP drafter in fp8 (that is where its KV
+advantage comes from), so there is nothing to graft and `MODE=hybrid-mtp` refuses it; the `context`
+profile pins `MODEL=RadixArk/…` for that reason. A graft on top of the RadixArk hybrid: the MTP draft head's routed experts (BF16 fused, ~4.7 GiB)
 are replaced by the **NVFP4** draft experts from
 [Inferact/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/Inferact/Qwen3.8-Flash-Next-NVFP4)
 (1.4 GiB) — the combination neither parent ships: fp8 PLE table *and* a cheap draft.
@@ -637,52 +670,85 @@ boot-to-boot range of the preview image). **The preview `Dockerfile` remains the
 field time on our own box; if you want to be on the release line, it is ready and tested.
 Full port notes in [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md#the-vllm-v0290-port-dockerfilev029).
 
-## Other checkpoints: NVIDIA's NVFP4 and derivatives
+## Checkpoints: NVIDIA's NVFP4 (default) and RadixArk's
 
-The recipe is checkpoint-agnostic as long as the layout matches (NVFP4 routed experts, fp8 PLE
-table, bf16 side layers): `MODEL=<org/name>` on `download-weights.sh` and `serve.sh` (or a
-`K=V` on `./flash serve`). Two families are tested:
+Two NVFP4 quantizations of Qwen3.8-Flash-Next fit this recipe, and the recipe does not care which
+one it serves: `MODEL=<org/name>` on `download-weights.sh`, `prepare-hybrid.sh` and `serve.sh` (or
+`./flash setup default MODEL=…` then `./flash serve`). Both have NVFP4 routed experts, the fp8 PLE
+table this whole repo is about, and bf16 side layers that `prepare-hybrid.sh` converts to blockwise fp8
+the same way (the 300 side tensors are the same weights, down to the conversion error); the
+deterministic top-k, the reduced draft vocabulary, prefix caching and YaRN apply identically.
 
+- **[nvidia/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4)** — **the
+  default since 2026-09-14.** NVIDIA's own ModelOpt export (issue #17, @PathosEthosLogos). 124 GiB in
+  24 files, one of them a 50 GiB PLE shard that only downloads through Xet (`download-weights.sh` uses
+  Xet by default). Its MTP drafter keeps its experts in blockwise fp8 under a ModelOpt *mixed-precision*
+  config; vLLM 0.29 could not load that (no method for those experts, and the layer index of the
+  drafter not remapped), which is patch 11: on the v0.29 image a backport of vLLM's own fix
+  (vllm#55513, `src/patch_block_fp8_mtp.py`, @techfury90), on the preview image the stopgap shim
+  (`src/vllm_modelopt_block_moe.py`). Validated on both images.
 - **[RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4)** — the
-  default, everything above was measured on it.
-- **[nvidia/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4)** — NVIDIA's
-  own quantization (issue #17). Same experts, same PLE table, same bf16 side layers, but a ModelOpt
-  *mixed-precision* config and an MTP drafter whose experts are **blockwise fp8** instead of bf16. Two
-  things were needed: the 50 GiB PLE shard only downloads through Xet (now the default), and patch 11.
-  vLLM 0.29's mixed-precision config has no method for those experts and looks them up under the
-  wrong layer index, so they came out unquantized and loading died on the missing
-  `w2_weight_scale_inv`. vLLM fixed this upstream in vllm#55513 (on vLLM `main`, not yet in a
-  release). The v0.29 image carries a backport of that fix (`src/patch_block_fp8_mtp.py`, by
-  @techfury90), which replaced the temporary shim there; the preview image keeps the shim, which
-  routes those layers to vLLM's own block-fp8 MoE method (`src/vllm_modelopt_block_moe.py`).
-  `prepare-hybrid.sh` works on it unchanged (the 300 side tensors are the same weights as RadixArk's,
-  down to the conversion error).
+  default until 2026-09-14, the checkpoint every number in the sections above was measured on. 122 GiB
+  in 418 files, plain ModelOpt NVFP4 config, bf16 MTP drafter (hence the `hybrid-mtp` graft, which only
+  exists for it). Fully supported, one variable away:
 
 ```bash
-MODEL=nvidia/Qwen3.8-Flash-Next-NVFP4 scripts/download-weights.sh          # 124 GiB, Xet
-MODEL=nvidia/Qwen3.8-Flash-Next-NVFP4 scripts/prepare-hybrid.sh            # optional, ~2 min here
-MODEL=nvidia/Qwen3.8-Flash-Next-NVFP4 MODE=hybrid YARN=1 CTX=500000 scripts/serve.sh
+MODEL=RadixArk/Qwen3.8-Flash-Next-NVFP4 scripts/download-weights.sh
+MODEL=RadixArk/Qwen3.8-Flash-Next-NVFP4 scripts/prepare-hybrid.sh
+MODEL=RadixArk/Qwen3.8-Flash-Next-NVFP4 MODE=hybrid YARN=1 CTX=500000 scripts/serve.sh
+#   or: ./flash setup default MODEL=RadixArk/Qwen3.8-Flash-Next-NVFP4 && ./flash serve default MODEL=RadixArk/Qwen3.8-Flash-Next-NVFP4
 ```
 
-Measured on our GX10, v0.29 base, identical settings (YaRN 500k, deterministic top-k, reduced draft
-vocabulary, prefix caching), same day:
+### Why the default changed: the head-to-head (2026-09-13/14)
 
-| | RadixArk hybrid + MTP=2 (default) | NVIDIA hybrid + MTP=2 | NVIDIA as published + MTP=2 |
-|---|---|---|---|
-| agentic tournament (43 scenarios) | 91.1% ± 1.8 (3 runs) | 90.7% (1 run) | 88.7% ± 1.1 (3 runs) |
-| needle, 92k → 413k, two seeds | 6/6 | 6/6 | 8/8 |
-| deterministic at temperature 0 | yes | yes | yes |
-| decode, single stream | 36.4 tok/s | 34.0 tok/s | 27.7 tok/s |
-| prefill 8k / 32k | 2,529 / 3,026 tok/s | 2,511 / 2,988 | 2,459 / 3,108 |
-| KV pool @500k, `GPU_MEM=0.80` | ~580k tokens | **721k tokens** | 565k |
-| draft acceptance | 85–90% | 83% | 89% |
+The rule of this repo is quality first; a default only moves on measured data, never on a smoke test.
+So the two checkpoints were run through the same protocol, back to back, on the same box:
 
-Reading: parity on quality and long context (the long-context regression reported for RadixArk did not
-reproduce here), a few percent slower decode, and a real KV advantage because the fp8 drafter is
-lighter. The default stays RadixArk; NVIDIA is the one to pick for concurrency or context. Derivatives
-of either checkpoint (abliterated variants such as `Jiunsong/SuperQwen3.8-Flash-Next-abliterated-NVFP4-DGX-Spark`
-or `drowzeys/keys-Qwen3.8-Flash-Next-NVFP4-dual-ablit-house-qsa-L3-47`) run with the same commands; we
-do not ship or endorse them, we only note that the recipe does not care.
+- **same image** (`qwen38-flash-dgx`, v0.29 base, the tree of `main`), **same recipe** (hybrid,
+  deterministic top-k, draft vocab 65k, MTP=2, YaRN 500k, prefix caching), **only `MODEL` differs**;
+- one boot per checkpoint; on that boot: speed, memory, long-context and determinism probes, then
+  **5 full passes of the agentic tournament** — 55 scenarios (tool loops with injected faults,
+  long ledgers, logic grids, calendar and org-chart deduction, hidden-test coding), temperature 0.2,
+  32k reasoning tokens per turn, partial credit on multi-item scenarios — then a dedicated block on
+  the four coding tasks where this model's reasoning most often runs away (10 samples each);
+- 16 h of GPU time, 275 scored runs per side, every trajectory kept.
+
+| | RadixArk hybrid + MTP=2 | **NVIDIA hybrid + MTP=2 (default)** |
+|---|---|---|
+| tournament, 5 passes × 55 scenarios | 86.1% ± 1.9 (85.7 / 84.2 / 88.1 / 88.1 / 84.5) | **88.8% ± 1.0** (89.0 / 89.0 / 87.2 / 89.0 / 89.9) |
+| items lost on the 46 scenarios that never run away (230 runs) | 4.1 | **0.7** |
+| reasoning runaways (32k-token cap), all coding tasks | 49/65 | 46/65 (p = 0.55: equal) |
+| scenarios where one side is behind | none for RadixArk beyond one-run noise on g9 | none for NVIDIA |
+| needle 100k / 185k / 323k / 413k | 4/4 found | 4/4 found |
+| deterministic at temperature 0 | yes | yes |
+| decode, single stream, greedy prose | **37.1 tok/s** | 34.5 tok/s (−7%) |
+| decode per stream, 4 concurrent agents | 21.6 tok/s | 22.1 tok/s |
+| prefill 8k / 32k (cold) | 5.1 s / 10.6 s | 5.0 s / 11.3 s |
+| prefill at 185k / 323k / 413k | 1,919 / 2,497 / 2,856 tok/s | 1,857 / 2,465 / 2,782 tok/s |
+| KV pool @500k, `GPU_MEM=0.80` | 589k tokens | **679k tokens (+15%)**; +22% on another boot |
+| weights loaded | 77.3 GiB | **74.9 GiB** |
+| download | 122 GiB, 418 files, HTTPS or Xet | 124 GiB, 24 files, **Xet required** (50 GiB shard) |
+
+How to read it, honestly:
+
+- The 2.7-point gap is above the noise floor of a 5-pass design (bootstrap CI [+0.4, +5.3], permutation
+  p = 0.048) but about half of it is luck on the runaway-prone coding tasks, where both checkpoints
+  derail at the same rate. The half that is not luck is a handful of slips only RadixArk made: a
+  counting error on a paginated ledger (5 of 5 passes there, 8 of 18 across three images; NVIDIA 14 of
+  15), one fabricated tool trajectory, two mis-executed multi-step tool tasks. NVIDIA's only systematic
+  weakness in the data is a reporting convention (it under-counts a `total_moved` line while executing
+  the 30 operations perfectly).
+- The claim this data supports is **"parity or better on quality, +15–22% KV, −8% single-stream
+  decode, vendor checkpoint whose loading fix is upstream"** — not "NVIDIA is 2.7 points smarter".
+- Under that reading the default rule is unambiguous: at quality parity or better, the checkpoint that
+  leaves more room for context and concurrency, and that the next vLLM release will load with no patch
+  at all, is the one to ship. If your use is a single chat stream where 37 vs 34 tok/s is what you
+  feel, RadixArk keeps a small edge and is one variable away.
+
+Derivatives of either checkpoint (abliterated variants such as
+`Jiunsong/SuperQwen3.8-Flash-Next-abliterated-NVFP4-DGX-Spark` or
+`drowzeys/keys-Qwen3.8-Flash-Next-NVFP4-dual-ablit-house-qsa-L3-47`) run with the same commands; we do
+not ship or endorse them, we only note that the recipe does not care.
 
 ## Tuning (env vars for `scripts/serve.sh`)
 
@@ -914,9 +980,9 @@ src/test_ple_mmap_cpu.py          CPU unit test for the gather (no GPU needed)
 src/test_qsa_exact_topk_cpu.py    CPU unit test for the exact top-k (no GPU needed)
 src/test_block_fp8_mtp_cpu.py     CPU unit test for the vllm#55513 backport (no GPU needed; v0.29 image)
 tools/fp8_convert.py              side-layer bf16 -> blockwise fp8 (by @Saren-Arterius)
-scripts/download-weights.sh       MODEL, EXCLUDE, MAX_WORKERS, XET
+scripts/download-weights.sh       MODEL (default nvidia/Qwen3.8-Flash-Next-NVFP4), EXCLUDE, MAX_WORKERS, XET
 scripts/prepare-hybrid.sh         one-time: build the -fp8hybrid snapshot
-scripts/prepare-mtp-graft.sh      one-time: graft the NVFP4 MTP draft experts onto it (MODE=hybrid-mtp)
+scripts/prepare-mtp-graft.sh      one-time: graft the NVFP4 MTP draft experts onto it (MODE=hybrid-mtp, RadixArk only)
 tools/vllm_watch.py               live per-session view of prompts / reasoning / outputs / stats (needs LOG_REQUESTS=1; @0x3dlux)
 scripts/serve.sh                  MODE=nvfp4|hybrid|hybrid-mtp, PREFIX_CACHE, DET_TOPK, DRAFT_VOCAB, MADVISE, EXACT_TOPK, PAD_M4, KV_DTYPE, YARN, ...
 scripts/smoke-test.sh             health, coherence, prefix-cache hit, determinism, tok/s
@@ -967,7 +1033,7 @@ docker run --rm -v "$PWD/src:/t" -w /t --entrypoint python3 qwen38-flash-dgx:v0.
   AGPL-3.0) and measured on this checkpoint.
 
 - Model: **Qwen team, Alibaba** — Qwen3.8-Flash-Next.
-- NVFP4 checkpoint: **[RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4)**.
+- NVFP4 checkpoints: **[nvidia/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4)** (the default since 2026-09-14) and **[RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4)** (the default before, still supported).
 - NVFP4 MTP draft experts (the `hybrid-mtp` graft donor): **[Inferact/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/Inferact/Qwen3.8-Flash-Next-NVFP4)**; the graft recipe follows
   [thavoc's graft write-up](https://gist.github.com/thavoc/d7083457f6f2d981f879670c34df34ab)
   and [Peuqui/mtp-quant-transplant](https://github.com/Peuqui/mtp-quant-transplant).
