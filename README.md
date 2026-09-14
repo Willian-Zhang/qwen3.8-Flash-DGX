@@ -745,10 +745,16 @@ How to read it, honestly:
   at all, is the one to ship. If your use is a single chat stream where 37 vs 34 tok/s is what you
   feel, RadixArk keeps a small edge and is one variable away.
 
-Derivatives of either checkpoint (abliterated variants such as
+Derivatives of either checkpoint in the same ModelOpt layout (abliterated variants such as
 `Jiunsong/SuperQwen3.8-Flash-Next-abliterated-NVFP4-DGX-Spark` or
 `drowzeys/keys-Qwen3.8-Flash-Next-NVFP4-dual-ablit-house-qsa-L3-47`) run with the same commands; we do
-not ship or endorse them, we only note that the recipe does not care.
+not ship or endorse them, we only note that the recipe does not care. **Compressed-tensors derivatives**
+(`orcarouter/Qwen3.8-Flash-Next-Uncensored-NVFP4` and `lychee888/…-FP8PLE`, issue #23) are a different
+format: their quantization config lives in `config.json` (no `hf_quant_config.json`, which is fine, vLLM
+reads it from there) and their dense side layers are **already fp8**, so the hybrid step has nothing to
+convert — `prepare-hybrid.sh` and `flash doctor` say so and point to the `published` profile
+(`MODE=nvfp4`). The PLE table of the lychee888 build uses RadixArk's exact file and key layout, so the
+mmap patch should apply; we have not booted one ourselves.
 
 ## Tuning (env vars for `scripts/serve.sh`)
 

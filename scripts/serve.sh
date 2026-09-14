@@ -110,7 +110,7 @@ case "$MODE" in
         || echo "!! hybrid-mtp checkpoint not prepared: run scripts/prepare-mtp-graft.sh first (needs prepare-hybrid.sh; one-time, ~5 min)"
       exit 1
     fi
-    for f in config.json tokenizer.json tokenizer_config.json hf_quant_config.json; do
+    for f in config.json tokenizer.json tokenizer_config.json; do
       [ -e "$REPO_DIR/snapshots/${SNAP_NAME}${SUFFIX}/$f" ] || {
         echo "!! the ${SUFFIX} layout has no $f: it was prepared from an incomplete download (issue #17; vLLM would fail on"
         echo "   'Couldn't instantiate the backend tokenizer'). Fix: scripts/prepare-hybrid.sh (it repairs the directory)$([ "$MODE" = hybrid-mtp ] && echo ', then scripts/prepare-mtp-graft.sh')"

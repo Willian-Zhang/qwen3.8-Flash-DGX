@@ -39,12 +39,25 @@ DST_IN="${SRC_IN}-fp8hybrid"
 # without tokenizer.json or a shard, and a hybrid layout prepared from it stays incomplete forever:
 # vLLM then fails on "Couldn't instantiate the backend tokenizer ... sentencepiece" (issue #17).
 # So: refuse an incomplete snapshot, and when the layout already exists, repair it instead of exiting.
-ESSENTIAL="config.json generation_config.json hf_quant_config.json tokenizer.json tokenizer_config.json chat_template.jinja preprocessor_config.json model.safetensors.index.json"
+ESSENTIAL="config.json generation_config.json tokenizer.json tokenizer_config.json chat_template.jinja preprocessor_config.json model.safetensors.index.json"
 missing_in() {  # <dir> [shards] -> names of essential files (and, with 'shards', of index shards) missing or dangling
   python3 - "$1" "${2:-}" "$ESSENTIAL" <<'PY'
 import json, os, sys
 d, shards, ess = sys.argv[1], sys.argv[2], sys.argv[3].split()
+# quantization config: hf_quant_config.json (ModelOpt) OR quantization_config inside config.json
+# (compressed-tensors checkpoints, e.g. orcarouter/lychee888 derivatives, ship only the latter — #23)
+def quant_cfg(d):
+    if os.path.exists(os.path.join(d, "hf_quant_config.json")):
+        return "hf_quant_config.json"
+    try:
+        c = json.load(open(os.path.join(d, "config.json")))
+        q = c.get("quantization_config") or (c.get("text_config") or {}).get("quantization_config")
+        return "config.json" if q else None
+    except Exception:
+        return None
 miss = [f for f in ess if not os.path.exists(os.path.join(d, f))]
+if "config.json" not in miss and not quant_cfg(d):
+    miss.append("quantization-config(hf_quant_config.json-or-config.json:quantization_config)")
 if shards and "model.safetensors.index.json" not in miss:
     try:
         wm = json.load(open(os.path.join(d, "model.safetensors.index.json")))["weight_map"]
@@ -58,6 +71,23 @@ MISS="$(missing_in "$SNAP_HOST" shards)"
 if [ -n "$MISS" ]; then
   echo "!! snapshot INCOMPLETE, missing or dangling: $MISS"
   echo "   re-run scripts/download-weights.sh (resumable, re-checks in seconds), then this script again"
+  exit 1
+fi
+
+# The conversion targets the bf16 side layers of a ModelOpt NVFP4 checkpoint. A compressed-tensors
+# checkpoint (orcarouter / lychee888 derivatives: quant_method "compressed-tensors" in config.json) already
+# ships those layers quantized, and its dispatch is vLLM's own, not our ModelOpt shim: nothing to convert.
+QM="$(python3 - "$SNAP_HOST" <<'PY'
+import json, os, sys
+c = json.load(open(os.path.join(sys.argv[1], "config.json")))
+q = c.get("quantization_config") or (c.get("text_config") or {}).get("quantization_config") or {}
+print(q.get("quant_method") or ("compressed-tensors" if "config_groups" in q else "modelopt-or-unknown"))
+PY
+)"
+if [ "$QM" = "compressed-tensors" ]; then
+  echo "!! $MODEL is a compressed-tensors checkpoint (quantization_config in config.json): its dense side layers are"
+  echo "   already quantized and vLLM dispatches them natively — there is nothing for the hybrid conversion to do."
+  echo "   Serve it as published:  MODE=nvfp4 scripts/serve.sh   (or ./flash serve published)"
   exit 1
 fi
 

@@ -91,12 +91,25 @@ snapshot_dir() {
 }
 # Present = the essential files + EVERY shard the index names (a download interrupted on one file leaves a
 # dangling symlink or no tokenizer.json; the HF cache still looks complete at a glance — issue #17).
-ESSENTIAL_FILES="config.json generation_config.json hf_quant_config.json tokenizer.json tokenizer_config.json chat_template.jinja preprocessor_config.json model.safetensors.index.json"
+ESSENTIAL_FILES="config.json generation_config.json tokenizer.json tokenizer_config.json chat_template.jinja preprocessor_config.json model.safetensors.index.json"
 have_weights()  { local s; s="$(snapshot_dir)"; [ -n "$s" ] && [ -z "$(missing_files "$s" shards)" ]; }
 missing_files() { python3 - "$1" "${2:-}" "$ESSENTIAL_FILES" <<'PY' 2>/dev/null
 import json, os, sys
 d, shards, ess = sys.argv[1], sys.argv[2], sys.argv[3].split()
+# quantization config: hf_quant_config.json (ModelOpt) OR quantization_config inside config.json
+# (compressed-tensors checkpoints, e.g. orcarouter/lychee888 derivatives, ship only the latter — #23)
+def quant_cfg(d):
+    if os.path.exists(os.path.join(d, "hf_quant_config.json")):
+        return "hf_quant_config.json"
+    try:
+        c = json.load(open(os.path.join(d, "config.json")))
+        q = c.get("quantization_config") or (c.get("text_config") or {}).get("quantization_config")
+        return "config.json" if q else None
+    except Exception:
+        return None
 miss = [f for f in ess if not os.path.exists(os.path.join(d, f))]
+if "config.json" not in miss and not quant_cfg(d):
+    miss.append("quantization-config(hf_quant_config.json-or-config.json:quantization_config)")
 if shards and "model.safetensors.index.json" not in miss:
     try:
         wm = json.load(open(os.path.join(d, "model.safetensors.index.json")))["weight_map"]
@@ -104,6 +117,18 @@ if shards and "model.safetensors.index.json" not in miss:
     except Exception:
         miss.append("model.safetensors.index.json(unreadable)")
 print(" ".join(miss))
+PY
+}
+# "compressed-tensors" for orcarouter/lychee888-style derivatives (side layers already quantized, quant config
+# in config.json) — the hybrid conversion does not apply to them (#23); "" when unknown.
+quant_method()  { local s; s="$(snapshot_dir)"; [ -n "$s" ] && python3 - "$s" <<'PY' 2>/dev/null
+import json, os, sys
+try:
+    c = json.load(open(os.path.join(sys.argv[1], "config.json")))
+    q = c.get("quantization_config") or (c.get("text_config") or {}).get("quantization_config") or {}
+    print(q.get("quant_method") or ("compressed-tensors" if "config_groups" in q else ""))
+except Exception:
+    pass
 PY
 }
 have_hybrid()   { local s; s="$(snapshot_dir)"; [ -n "$s" ] && [ -f "${s}-fp8hybrid/.prepared" ]; }
@@ -181,7 +206,9 @@ cmd_doctor() {
   fi
   case "$MODE" in
     hybrid|hybrid-mtp)
-      if have_hybrid; then
+      if have_weights && [ "$(quant_method)" = compressed-tensors ]; then
+        warn "$MODEL is a compressed-tensors checkpoint: its side layers are already quantized, the hybrid conversion does not apply — use the 'published' profile (MODE=nvfp4)"
+      elif have_hybrid; then
         local stale; stale="$(hybrid_stale)"
         if [ -n "$stale" ]; then warn "hybrid layout prepared from an INCOMPLETE download, missing: $stale — run scripts/prepare-hybrid.sh again, it repairs it (issue #17)"; else ok "hybrid checkpoint prepared (-fp8hybrid)"; fi
       else
