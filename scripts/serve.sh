@@ -135,8 +135,13 @@ SNAP_IN="/hf/hub/models--${MODEL//\//--}/snapshots/$SNAP_NAME"
 # minimal -> low); every other effort renders byte-identically. The line is rewritten rather than
 # reassigning reasoning_effort in a preamble, so the result never depends on how a Jinja
 # implementation scopes a {% set %} over a render argument.
-# The copy lives under $HF_CACHE (mounted at /hf) so the container's restart policy still finds it.
+# The copy goes to the first writable of: the HF cache, ~/.cache, the checkout (a cache created by a
+# manual `docker run` is root-owned, and this must not silently degrade to a 400 there). It is
+# bind-mounted read-only at a fixed path, so the location does not matter to the container or to
+# its --restart policy.
+SERVE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEMPLATE_ARGS=()
+TEMPLATE_MNT=()
 EFFORT_ALIAS_STATE=off
 TEMPLATE_HOST="$REPO_DIR/snapshots/$SNAP_NAME/chat_template.jinja"
 EFFORT_RESOLVE_OLD="{%- set resolved_reasoning_effort = reasoning_effort|default('xhigh') %}"
@@ -151,16 +156,20 @@ if [ "$EFFORT_ALIAS" = 1 ]; then
       echo "!! EFFORT_ALIAS: the template's effort line is not the expected one; serving it as is (reasoning_effort high will 400)"
       EFFORT_ALIAS_STATE="off (unexpected template)"
     else
-      ALIAS_REL="qwen38-flash-dgx/chat-templates/models--${MODEL//\//--}--${SNAP_NAME}.jinja"
-      ALIAS_HOST="$HF_CACHE/$ALIAS_REL"
-      if mkdir -p "$(dirname "$ALIAS_HOST")" 2>/dev/null \
+      ALIAS_NAME="models--${MODEL//\//--}--${SNAP_NAME}.jinja"
+      ALIAS_HOST=""
+      for d in "$HF_CACHE/qwen38-flash-dgx/chat-templates" "${XDG_CACHE_HOME:-$HOME/.cache}/qwen38-flash-dgx/chat-templates" "$SERVE_ROOT/.cache/chat-templates"; do
+        if mkdir -p "$d" 2>/dev/null && [ -w "$d" ]; then ALIAS_HOST="$d/$ALIAS_NAME"; break; fi
+      done
+      if [ -n "$ALIAS_HOST" ] \
          && printf '%s%s' "{#- scripts/serve.sh (EFFORT_ALIAS=1): effort line rewritten, high/max -> xhigh, minimal -> low. -#}" \
               "${TPL/"$EFFORT_RESOLVE_OLD"/"$EFFORT_RESOLVE_NEW"}" > "$ALIAS_HOST.tmp" 2>/dev/null \
          && mv -f "$ALIAS_HOST.tmp" "$ALIAS_HOST"; then
-        TEMPLATE_ARGS=(--chat-template "/hf/$ALIAS_REL")
-        EFFORT_ALIAS_STATE=on
+        TEMPLATE_ARGS=(--chat-template /qwen38/chat_template.jinja)
+        TEMPLATE_MNT=(-v "$ALIAS_HOST:/qwen38/chat_template.jinja:ro")
+        EFFORT_ALIAS_STATE="on ($ALIAS_HOST)"
       else
-        echo "!! EFFORT_ALIAS: could not write $ALIAS_HOST; serving the checkpoint's template as is (reasoning_effort high will 400)"
+        echo "!! EFFORT_ALIAS: no writable place for the template copy (tried $HF_CACHE/qwen38-flash-dgx, ${XDG_CACHE_HOME:-$HOME/.cache}/qwen38-flash-dgx and $SERVE_ROOT/.cache); serving the checkpoint's template as is (reasoning_effort high will 400)"
         EFFORT_ALIAS_STATE="off (write failed)"
       fi
     fi
@@ -249,7 +258,7 @@ docker run -d --name "$NAME" --restart unless-stopped \
   --gpus all --ipc=host --shm-size 16g -p "${PORT}:8000" \
   -v "$HF_CACHE:/hf" -e HF_HOME=/hf -e HF_HUB_OFFLINE=1 \
   "${PROM_ARGS[@]}" \
-  "${CACHE_MNT[@]}" \
+  "${CACHE_MNT[@]}" "${TEMPLATE_MNT[@]}" \
   -e VLLM_PLE_MMAP=1 -e VLLM_PLE_MMAP_WORKERS="${WORKERS:-32}" -e VLLM_PLE_MMAP_PREWARM="$PREWARM" \
   -e VLLM_QSA_EXACT_TOPK="$EXACT_TOPK" "${DETENV[@]}" -e VLLM_FP8_PAD_M4="$PAD_M4" \
   -e VLLM_USE_FLASHINFER_SAMPLER=1 -e VLLM_ALLOW_LONG_MAX_MODEL_LEN="$ALLOW_LONG" \

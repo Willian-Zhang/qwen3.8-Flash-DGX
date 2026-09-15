@@ -198,6 +198,7 @@ cmd_doctor() {
 
   step "weights ($MODEL in $HF_CACHE)"
   mkdir -p "$HF_CACHE" 2>/dev/null || true
+  if [ -d "$HF_CACHE" ] && [ ! -w "$HF_CACHE" ]; then warn "$HF_CACHE is not writable by you (owner: $(stat -c %U "$HF_CACHE" 2>/dev/null)), typically a cache first created by a manual 'docker run -v'. Downloads still work (the container runs as root); serve.sh keeps its chat-template copy elsewhere. To own it: sudo chown -R \$USER $HF_CACHE"; fi
   local free; free="$(gib_free_at "$HF_CACHE")"
   if have_weights; then ok "checkpoint present: $(snapshot_dir)"; else
     local sdir miss; sdir="$(snapshot_dir)"; miss="$( [ -n "$sdir" ] && missing_files "$sdir" shards )"
