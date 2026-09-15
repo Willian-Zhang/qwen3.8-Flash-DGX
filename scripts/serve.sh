@@ -25,6 +25,11 @@
 #   DRAFT_VOCAB=1     1 = the MTP drafter scores only the 65,536 most frequent tokens (+20% decode, same
 #                     tournament score); 0 = full vocabulary; a path = your own ids.npy (tools/build_draft_vocab.py)
 #   MADVISE=random    madvise on the mmapped PLE table: random (default; no readahead, cleaner page cache) or normal
+#   FAST_ROWS=0       PLE gathers of up to this many unique rows run inline on one thread, larger ones on the
+#                     WORKERS pool. 0 = every gather on the pool, so faults on rows the page cache dropped
+#                     overlap (+8% decode at 1 stream, +17% aggregate at 4, README); 512 = old inline path
+#   EFFORT_ALIAS=1    1 = accept reasoning_effort high/max (-> xhigh) and minimal (-> low): the checkpoint's
+#                     template only takes xhigh/medium/low and 400s the rest, including Claude Code's "high"
 #   LOG_REQUESTS=0    1 = log every prompt and output (VLLM_LOGGING_LEVEL=DEBUG, --enable-log-requests
 #                     --enable-log-outputs) for tools/vllm_watch.py. Debugging only: privacy + unbounded logs
 #   PORT=18300        host port for the API
@@ -32,6 +37,13 @@
 #   YARN=0            1 = YaRN rope scaling (factor 4) for CTX > 262144
 #   SEQS=8            max concurrent sequences. Do NOT leave this at 1-2 when measuring
 #                     throughput: requests queue silently and aggregate tok/s flatlines
+#   PROM_MULTIPROC=0  1 = engine-side metrics (vllm:ple_mmap_*) reach /metrics (opt-in; see PROM_ARGS below)
+#   KV_CACHE_MEM=     bytes for the KV cache, as --kv-cache-memory-bytes. GPU_MEM is a fraction of
+#                     TOTAL device memory, so it also leaves out whatever was already resident;
+#                     vLLM prints the exact value it would accept at startup ("Replace
+#                     gpu_memory_utilization config with --kv-cache-memory=..."). On a Spark the
+#                     headroom it reports is also what the page cache uses for the PLE table, so
+#                     claiming it trades prefill for KV. Watch vllm:ple_mmap_gather_seconds_total
 #   GPU_MEM=0.80      fraction of the 128 GB pool for weights+KV. 0.85 buys ~2 GiB of KV but the
 #                     box drifted into swap after a day at it; 0.875 got OOM-killed on a 300k prefill
 #   MTP=2             speculative tokens from the model's MTP head (0 = off)
@@ -39,14 +51,18 @@
 #   PREWARM=0         1 = stream the 48 GiB table once at boot to warm the page cache
 #   WORKERS=32        threads for the mmap gather
 #   EXTRA=            extra vllm flags passed verbatim
-#   IMAGE=qwen38-flash-dgx   MODEL=RadixArk/Qwen3.8-Flash-Next-NVFP4
+#   COMPILE_CACHE=    where to keep vLLM's compiled graphs and FlashInfer's JIT modules across
+#                     boots. Unset (default) = inside the container, which this script recreates
+#                     every time, so they are rebuilt on every boot (80 s of init engine, see
+#                     README). A bare name becomes docker volumes, an absolute path binds dirs
+#   IMAGE=qwen38-flash-dgx   MODEL=nvidia/Qwen3.8-Flash-Next-NVFP4   (RadixArk/Qwen3.8-Flash-Next-NVFP4 still supported: MODEL=...)
 #   BASE=             preview|v0.29 — normally read from the image label (Dockerfile vs Dockerfile.v0.29).
 #                     On v0.29: KV_DTYPE must stay auto (fp8 KV not ported), PAD_M4 is a no-op.
 set -euo pipefail
 
 NAME="${NAME:-qwen38-flash}"
 IMAGE="${IMAGE:-qwen38-flash-dgx}"
-MODEL="${MODEL:-RadixArk/Qwen3.8-Flash-Next-NVFP4}"
+MODEL="${MODEL:-nvidia/Qwen3.8-Flash-Next-NVFP4}"   # default since 2026-09-14; see README "Checkpoints"
 HF_CACHE="${HF_CACHE:-$HOME/.cache/huggingface}"
 MODE="${MODE:-nvfp4}"
 PREFIX_CACHE="${PREFIX_CACHE:-1}"
@@ -55,6 +71,8 @@ EXACT_TOPK="${EXACT_TOPK:-0}"
 PAD_M4="${PAD_M4:-0}"
 DRAFT_VOCAB="${DRAFT_VOCAB:-1}"
 MADVISE="${MADVISE:-random}"
+FAST_ROWS="${FAST_ROWS:-0}"
+EFFORT_ALIAS="${EFFORT_ALIAS:-1}"
 LOG_REQUESTS="${LOG_REQUESTS:-0}"
 PORT="${PORT:-18300}"
 CTX="${CTX:-262144}"
@@ -63,8 +81,11 @@ SEQS="${SEQS:-8}"
 GPU_MEM="${GPU_MEM:-0.80}"
 MTP="${MTP:-2}"
 KV_DTYPE="${KV_DTYPE:-auto}"
+KV_CACHE_MEM="${KV_CACHE_MEM:-}"
+PROM_MULTIPROC="${PROM_MULTIPROC:-0}"
 PREWARM="${PREWARM:-0}"
 EXTRA="${EXTRA:-}"
+COMPILE_CACHE="${COMPILE_CACHE:-}"
 
 # Resolve the local snapshot directory and map it to the in-container mount.
 REPO_DIR="$HF_CACHE/hub/models--${MODEL//\//--}"
@@ -87,18 +108,77 @@ case "$MODE" in
   nvfp4) ;;
   hybrid|hybrid-mtp)
     SUFFIX="-fp8hybrid"
-    [ "$MODE" = hybrid-mtp ] && SUFFIX="-fp8hybrid-mtpnvfp4"
+    if [ "$MODE" = hybrid-mtp ]; then
+      case "$MODEL" in RadixArk/*) ;; *) echo "!! MODE=hybrid-mtp only applies to RadixArk/Qwen3.8-Flash-Next-NVFP4 (bf16 MTP drafter); $MODEL already has an fp8 drafter: use MODE=hybrid"; exit 1 ;; esac
+      SUFFIX="-fp8hybrid-mtpnvfp4"
+    fi
     if [ ! -f "$REPO_DIR/snapshots/${SNAP_NAME}${SUFFIX}/.prepared" ]; then
       [ "$MODE" = hybrid ] && echo "!! hybrid checkpoint not prepared: run scripts/prepare-hybrid.sh first (one-time, ~10 min)" \
         || echo "!! hybrid-mtp checkpoint not prepared: run scripts/prepare-mtp-graft.sh first (needs prepare-hybrid.sh; one-time, ~5 min)"
       exit 1
     fi
+    for f in config.json tokenizer.json tokenizer_config.json; do
+      [ -e "$REPO_DIR/snapshots/${SNAP_NAME}${SUFFIX}/$f" ] || {
+        echo "!! the ${SUFFIX} layout has no $f: it was prepared from an incomplete download (issue #17; vLLM would fail on"
+        echo "   'Couldn't instantiate the backend tokenizer'). Fix: scripts/prepare-hybrid.sh (it repairs the directory)$([ "$MODE" = hybrid-mtp ] && echo ', then scripts/prepare-mtp-graft.sh')"
+        exit 1; }
+    done
     SNAP_NAME="${SNAP_NAME}${SUFFIX}"
     HYBRID_ENV=(-e VLLM_FP8_HYBRID=1 -e VLLM_USE_DEEP_GEMM=0)
     ;;
   *) echo "!! MODE must be nvfp4, hybrid or hybrid-mtp"; exit 1 ;;
 esac
 SNAP_IN="/hf/hub/models--${MODEL//\//--}/snapshots/$SNAP_NAME"
+
+# Reasoning effort aliases (EFFORT_ALIAS=1). The Qwen3.8-Flash-Next chat template (NVIDIA's, and every
+# RadixArk / abliterated copy of it) accepts reasoning_effort xhigh (its default), medium and low, and
+# raises on anything else. vLLM hands the request's effort to the template unchanged — on /v1/messages
+# that is output_config.effort, which Claude Code sets to "high" — so those requests fail with
+# 400 "Unexpected reasoning effort high". When the template carries that check, serve a copy in which
+# the one line that resolves the effort maps the rejected values first (high, max -> xhigh;
+# minimal -> low); every other effort renders byte-identically. The line is rewritten rather than
+# reassigning reasoning_effort in a preamble, so the result never depends on how a Jinja
+# implementation scopes a {% set %} over a render argument.
+# The copy goes to the first writable of: the HF cache, ~/.cache, the checkout (a cache created by a
+# manual `docker run` is root-owned, and this must not silently degrade to a 400 there). It is
+# bind-mounted read-only at a fixed path, so the location does not matter to the container or to
+# its --restart policy.
+SERVE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TEMPLATE_ARGS=()
+TEMPLATE_MNT=()
+EFFORT_ALIAS_STATE=off
+TEMPLATE_HOST="$REPO_DIR/snapshots/$SNAP_NAME/chat_template.jinja"
+EFFORT_RESOLVE_OLD="{%- set resolved_reasoning_effort = reasoning_effort|default('xhigh') %}"
+EFFORT_RESOLVE_NEW="{%- set resolved_reasoning_effort = {'high': 'xhigh', 'max': 'xhigh', 'minimal': 'low'}.get(reasoning_effort|default('xhigh'), reasoning_effort|default('xhigh')) %}"
+if [ "$EFFORT_ALIAS" = 1 ]; then
+  EFFORT_ALIAS_STATE="n/a (template accepts other efforts)"
+  if grep -qF "Supported types are xhigh (default), medium, and low." "$TEMPLATE_HOST" 2>/dev/null; then
+    TPL=""
+    IFS= read -r -d '' TPL < "$TEMPLATE_HOST" || true   # keeps trailing newlines, unlike $(cat)
+    TPL_REST="${TPL#*"$EFFORT_RESOLVE_OLD"}"
+    if [ "$TPL_REST" = "$TPL" ] || [[ "$TPL_REST" == *"$EFFORT_RESOLVE_OLD"* ]]; then
+      echo "!! EFFORT_ALIAS: the template's effort line is not the expected one; serving it as is (reasoning_effort high will 400)"
+      EFFORT_ALIAS_STATE="off (unexpected template)"
+    else
+      ALIAS_NAME="models--${MODEL//\//--}--${SNAP_NAME}.jinja"
+      ALIAS_HOST=""
+      for d in "$HF_CACHE/qwen38-flash-dgx/chat-templates" "${XDG_CACHE_HOME:-$HOME/.cache}/qwen38-flash-dgx/chat-templates" "$SERVE_ROOT/.cache/chat-templates"; do
+        if mkdir -p "$d" 2>/dev/null && [ -w "$d" ]; then ALIAS_HOST="$d/$ALIAS_NAME"; break; fi
+      done
+      if [ -n "$ALIAS_HOST" ] \
+         && printf '%s%s' "{#- scripts/serve.sh (EFFORT_ALIAS=1): effort line rewritten, high/max -> xhigh, minimal -> low. -#}" \
+              "${TPL/"$EFFORT_RESOLVE_OLD"/"$EFFORT_RESOLVE_NEW"}" > "$ALIAS_HOST.tmp" 2>/dev/null \
+         && mv -f "$ALIAS_HOST.tmp" "$ALIAS_HOST"; then
+        TEMPLATE_ARGS=(--chat-template /qwen38/chat_template.jinja)
+        TEMPLATE_MNT=(-v "$ALIAS_HOST:/qwen38/chat_template.jinja:ro")
+        EFFORT_ALIAS_STATE="on ($ALIAS_HOST)"
+      else
+        echo "!! EFFORT_ALIAS: no writable place for the template copy (tried $HF_CACHE/qwen38-flash-dgx, ${XDG_CACHE_HOME:-$HOME/.cache}/qwen38-flash-dgx and $SERVE_ROOT/.cache); serving the checkpoint's template as is (reasoning_effort high will 400)"
+        EFFORT_ALIAS_STATE="off (write failed)"
+      fi
+    fi
+  fi
+fi
 
 # The PLE gather is a CPU op + a pageable host->device copy: it MUST run outside
 # CUDA graphs. We declare it a splitting op and use PIECEWISE capture (never FULL*).
@@ -147,9 +227,35 @@ case "$DRAFT_VOCAB" in
   *) DETENV+=(-e VLLM_MTP_DRAFT_VOCAB="$DRAFT_VOCAB") ;;
 esac
 DETENV+=(-e VLLM_PLE_MMAP_MADVISE="$MADVISE")
+# The module reads this with a silent fallback to 512 on anything unparsable, so refuse a bad value here.
+case "$FAST_ROWS" in ''|*[!0-9]*) echo "!! FAST_ROWS must be a non-negative integer (0 = thread pool for every gather, 512 = old inline path)"; exit 1 ;; esac
+DETENV+=(-e VLLM_PLE_MMAP_FAST_ROWS="$FAST_ROWS")
 LOGARGS=(); [ "$LOG_REQUESTS" = 1 ] && { DETENV+=(-e VLLM_LOGGING_LEVEL=DEBUG); LOGARGS=(--enable-log-requests --enable-log-outputs); }
 PC_ARG=--no-enable-prefix-caching
 [ "$PREFIX_CACHE" = 1 ] && PC_ARG=--enable-prefix-caching
+
+# PROM_MULTIPROC=1 (opt-in): the vllm:ple_mmap_* counters (src/vllm_ple_mmap.py) live in the
+# EngineCore process. vLLM only puts prometheus_client into multiprocess mode for
+# api_server_count > 1, so with the single API server used here they would sit in
+# EngineCore's private registry and never reach /metrics. Setting
+# PROMETHEUS_MULTIPROC_DIR here makes /metrics aggregate every vLLM process; the tmpfs
+# is fresh per container, so no stale per-process files survive a restart.
+# Measured against a single-process /metrics: vLLM's own series keep their names and
+# labels, with no per-process pid label; the only loss is the *_created samples, which
+# prometheus_client does not export in multiprocess mode. That is why it is off
+# by default: it changes what existing dashboards see.
+PROM_ARGS=(); [ "$PROM_MULTIPROC" = 1 ] && PROM_ARGS=(--tmpfs /tmp/vllm-prometheus:rw,size=256m -e PROMETHEUS_MULTIPROC_DIR=/tmp/vllm-prometheus)
+# Both are keyed by a hash of the model and the engine config, so one pair is safe to
+# share across profiles: a different recipe lands in a different entry. /root/.triton is
+# deliberately not persisted — measured at 0.2 s, below CUDA-graph capture noise.
+CACHE_MNT=()
+case "$COMPILE_CACHE" in
+  "") ;;
+  /*) CACHE_MNT=(-v "$COMPILE_CACHE/vllm:/root/.cache/vllm"
+                -v "$COMPILE_CACHE/flashinfer:/root/.cache/flashinfer") ;;
+  *)  CACHE_MNT=(-v "${COMPILE_CACHE}-vllm:/root/.cache/vllm"
+                -v "${COMPILE_CACHE}-flashinfer:/root/.cache/flashinfer") ;;
+esac
 
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 # If docker run itself fails (port already bound, ...) do not leave a Created container behind.
@@ -158,6 +264,8 @@ trap 'rc=$?; [ $rc -ne 0 ] && docker rm -f "$NAME" >/dev/null 2>&1; exit $rc' EX
 docker run -d --name "$NAME" --restart unless-stopped \
   --gpus all --ipc=host --shm-size 16g -p "${PORT}:8000" \
   -v "$HF_CACHE:/hf" -e HF_HOME=/hf -e HF_HUB_OFFLINE=1 \
+  "${PROM_ARGS[@]}" \
+  "${CACHE_MNT[@]}" "${TEMPLATE_MNT[@]}" \
   -e VLLM_PLE_MMAP=1 -e VLLM_PLE_MMAP_WORKERS="${WORKERS:-32}" -e VLLM_PLE_MMAP_PREWARM="$PREWARM" \
   -e VLLM_QSA_EXACT_TOPK="$EXACT_TOPK" "${DETENV[@]}" -e VLLM_FP8_PAD_M4="$PAD_M4" \
   -e VLLM_USE_FLASHINFER_SAMPLER=1 -e VLLM_ALLOW_LONG_MAX_MODEL_LEN="$ALLOW_LONG" \
@@ -169,10 +277,10 @@ docker run -d --name "$NAME" --restart unless-stopped \
     $PC_ARG --enable-chunked-prefill --max-num-batched-tokens 8192 \
     $CC \
     --no-enable-flashinfer-autotune \
-    --kv-cache-dtype "$KV_DTYPE" \
+    --kv-cache-dtype "$KV_DTYPE" ${KV_CACHE_MEM:+--kv-cache-memory-bytes "$KV_CACHE_MEM"} \
     "${OVR_ARGS[@]}" "${LOGARGS[@]}" $EXTRA \
     --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3 \
-    "${SPEC[@]}"
+    "${TEMPLATE_ARGS[@]}" "${SPEC[@]}"
 
 # Fail loudly instead of printing a success line over a dead container: give vLLM a few
 # seconds to parse its arguments, then check the state (the status word only — the string
@@ -189,6 +297,6 @@ case "$STATE" in
     ;;
 esac
 
-echo ">> $NAME starting on :$PORT (model 'qwen3.8-flash-next', mode=$MODE, ctx $CTX, yarn=$YARN, mtp=$MTP, seqs=$SEQS, prefix_cache=$PREFIX_CACHE, det_topk=$DET_TOPK, exact_topk=$EXACT_TOPK, pad_m4=$PAD_M4, draft_vocab=$DRAFT_VOCAB, madvise=$MADVISE)"
-echo ">> first boot loads ~76 GiB of weights (~8-13 min). Follow:  docker logs -f $NAME"
+echo ">> $NAME starting on :$PORT (model 'qwen3.8-flash-next', mode=$MODE, ctx $CTX, yarn=$YARN, mtp=$MTP, seqs=$SEQS, prefix_cache=$PREFIX_CACHE, det_topk=$DET_TOPK, exact_topk=$EXACT_TOPK, pad_m4=$PAD_M4, draft_vocab=$DRAFT_VOCAB, madvise=$MADVISE, fast_rows=$FAST_ROWS, effort_alias=$EFFORT_ALIAS_STATE${COMPILE_CACHE:+, compile_cache=$COMPILE_CACHE})"
+echo ">> first boot loads ~75 GiB of weights (~8-13 min). Follow:  docker logs -f $NAME"
 echo ">> ready when the log says 'Application startup complete'. Then: scripts/smoke-test.sh"

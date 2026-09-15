@@ -16,7 +16,7 @@
 # @Saren-Arterius (Apache-2.0).
 set -euo pipefail
 
-MODEL="${MODEL:-RadixArk/Qwen3.8-Flash-Next-NVFP4}"
+MODEL="${MODEL:-nvidia/Qwen3.8-Flash-Next-NVFP4}"   # default since 2026-09-14; works unchanged on RadixArk/Qwen3.8-Flash-Next-NVFP4
 IMAGE="${IMAGE:-qwen38-flash-dgx}"
 HF_CACHE="${HF_CACHE:-$HOME/.cache/huggingface}"
 
@@ -34,7 +34,79 @@ DST="$REPO_DIR/snapshots/${SNAP_NAME}-fp8hybrid"
 SRC_IN="/hf/hub/models--${MODEL//\//--}/snapshots/${SNAP_NAME}"
 DST_IN="${SRC_IN}-fp8hybrid"
 
-if [ -f "$DST/.prepared" ]; then echo ">> already prepared: $DST"; exit 0; fi
+# The hybrid directory is a copy of the snapshot AS IT IS NOW. A download that stopped early (this
+# checkpoint is 24 files, one of them 50 GiB; Xet sometimes ends on a ReadTimeout) leaves a snapshot
+# without tokenizer.json or a shard, and a hybrid layout prepared from it stays incomplete forever:
+# vLLM then fails on "Couldn't instantiate the backend tokenizer ... sentencepiece" (issue #17).
+# So: refuse an incomplete snapshot, and when the layout already exists, repair it instead of exiting.
+ESSENTIAL="config.json generation_config.json tokenizer.json tokenizer_config.json chat_template.jinja preprocessor_config.json model.safetensors.index.json"
+missing_in() {  # <dir> [shards] -> names of essential files (and, with 'shards', of index shards) missing or dangling
+  python3 - "$1" "${2:-}" "$ESSENTIAL" <<'PY'
+import json, os, sys
+d, shards, ess = sys.argv[1], sys.argv[2], sys.argv[3].split()
+# quantization config: hf_quant_config.json (ModelOpt) OR quantization_config inside config.json
+# (compressed-tensors checkpoints, e.g. orcarouter/lychee888 derivatives, ship only the latter — #23)
+def quant_cfg(d):
+    if os.path.exists(os.path.join(d, "hf_quant_config.json")):
+        return "hf_quant_config.json"
+    try:
+        c = json.load(open(os.path.join(d, "config.json")))
+        q = c.get("quantization_config") or (c.get("text_config") or {}).get("quantization_config")
+        return "config.json" if q else None
+    except Exception:
+        return None
+miss = [f for f in ess if not os.path.exists(os.path.join(d, f))]
+if "config.json" not in miss and not quant_cfg(d):
+    miss.append("quantization-config(hf_quant_config.json-or-config.json:quantization_config)")
+if shards and "model.safetensors.index.json" not in miss:
+    try:
+        wm = json.load(open(os.path.join(d, "model.safetensors.index.json")))["weight_map"]
+        miss += sorted(f for f in set(wm.values()) if not os.path.exists(os.path.join(d, f)))
+    except Exception as e:
+        miss.append(f"model.safetensors.index.json(unreadable: {e})")
+print(" ".join(miss))
+PY
+}
+MISS="$(missing_in "$SNAP_HOST" shards)"
+if [ -n "$MISS" ]; then
+  echo "!! snapshot INCOMPLETE, missing or dangling: $MISS"
+  echo "   re-run scripts/download-weights.sh (resumable, re-checks in seconds), then this script again"
+  exit 1
+fi
+
+# The conversion targets the bf16 side layers of a ModelOpt NVFP4 checkpoint. A compressed-tensors
+# checkpoint (orcarouter / lychee888 derivatives: quant_method "compressed-tensors" in config.json) already
+# ships those layers quantized, and its dispatch is vLLM's own, not our ModelOpt shim: nothing to convert.
+QM="$(python3 - "$SNAP_HOST" <<'PY'
+import json, os, sys
+c = json.load(open(os.path.join(sys.argv[1], "config.json")))
+q = c.get("quantization_config") or (c.get("text_config") or {}).get("quantization_config") or {}
+print(q.get("quant_method") or ("compressed-tensors" if "config_groups" in q else "modelopt-or-unknown"))
+PY
+)"
+if [ "$QM" = "compressed-tensors" ]; then
+  echo "!! $MODEL is a compressed-tensors checkpoint (quantization_config in config.json): its dense side layers are"
+  echo "   already quantized and vLLM dispatches them natively — there is nothing for the hybrid conversion to do."
+  echo "   Serve it as published:  MODE=nvfp4 scripts/serve.sh   (or ./flash serve published)"
+  exit 1
+fi
+
+if [ -f "$DST/.prepared" ]; then
+  STALE="$(missing_in "$DST")"
+  if [ -z "$STALE" ]; then echo ">> already prepared: $DST"; exit 0; fi
+  echo ">> already prepared but missing $STALE (prepared from an incomplete download) — repairing from the snapshot"
+  docker run --rm --name qwen38-fp8repair -v "$HF_CACHE:/hf" --entrypoint bash "$IMAGE" -c "
+set -euo pipefail
+for f in '$SRC_IN'/*; do
+  b=\$(basename \"\$f\")
+  case \"\$b\" in *.safetensors|model.safetensors.index.json) continue ;; esac
+  [ -e '$DST_IN'/\"\$b\" ] || { cp -a \"\$f\" '$DST_IN'/; echo \"   + \$b\"; }
+done"
+  STALE="$(missing_in "$DST")"
+  [ -z "$STALE" ] || { echo "!! still missing after repair: $STALE"; exit 1; }
+  echo ">> repaired: $DST"
+  exit 0
+fi
 
 echo ">> preparing $DST (relative symlinks + 4 shards converted to blockwise fp8, ~10 min)"
 docker run --rm --name qwen38-fp8convert \

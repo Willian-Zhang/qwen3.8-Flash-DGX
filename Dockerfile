@@ -14,7 +14,8 @@
 #   8. Deterministic persistent_topk kernel           (VLLM_QSA_DET_TOPK=1) — replaces 5 at no prefill cost
 #   9. M%4 padding for the blockwise-fp8 GEMM         (VLLM_FP8_PAD_M4=1)   — hybrid mode with prefix caching OFF
 #  10. Reduced draft vocabulary for the MTP drafter    (VLLM_MTP_DRAFT_VOCAB=<ids.npy>) — +20% decode, same tournament score
-#  11. Lossless malformed Qwen tool preambles        (always on for the qwen3 parser)
+#  11. ModelOpt mixed-precision block-FP8 experts     (VLLM_MODELOPT_BLOCK_MOE=0 disables)
+#  12. Lossless malformed Qwen tool preambles        (always on for the qwen3 parser)
 #
 #   docker build -t qwen38-flash-dgx .
 #
@@ -150,7 +151,13 @@ COPY src/patch_mtp_draft_vocab.py /tmp/patch_mtp_draft_vocab.py
 COPY src/draft_vocab_65536.npy /opt/llm/draft_vocab_65536.npy
 RUN python3 /tmp/patch_mtp_draft_vocab.py ${SP}/vllm/models/qwen3_8_flash_next/nvidia/mtp.py && rm /tmp/patch_mtp_draft_vocab.py
 
-# --- 11. Preserve quoted/malformed Qwen tool markers in reasoning and content ---
+# --- 11. FP8_BLOCK_SCALES layers in ModelOpt MIXED_PRECISION checkpoints (NVIDIA's own NVFP4 checkpoint
+#        quantizes the MTP experts that way; vLLM's mixed-precision config does not know the algo) ---
+COPY src/vllm_modelopt_block_moe.py ${SP}/vllm_modelopt_block_moe.py
+RUN printf '\n\n# --- qwen38-flash-dgx: FP8_BLOCK_SCALES support for ModelOpt MIXED_PRECISION (VLLM_MODELOPT_BLOCK_MOE=0 disables) ---\nfrom vllm_modelopt_block_moe import apply as _block_moe_apply\n_block_moe_apply()\n' >> ${MO} \
+ && python3 -c "import ast; ast.parse(open('${MO}').read()); print('modelopt.py block-moe hooked OK')"
+
+# --- 12. Preserve quoted/malformed Qwen tool markers in reasoning and content ---
 # Confirm a tool preamble before switching output channels. Shared by both bases.
 COPY src/patches/qwen-tool-preamble.patch /tmp/qwen-tool-preamble.patch
 RUN cd ${SP} && patch --batch --forward --fuzz=0 -p1 < /tmp/qwen-tool-preamble.patch \

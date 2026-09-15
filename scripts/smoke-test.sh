@@ -14,6 +14,16 @@ curl -s -m 120 "$BASE/v1/completions" -H 'Content-Type: application/json' -d \
   '{"model":"qwen3.8-flash-next","prompt":"The capital of France is","max_tokens":12,"temperature":0}' \
   | python3 -c 'import json,sys;print("  ",repr(json.load(sys.stdin)["choices"][0]["text"]))'
 
+echo ">> reasoning_effort high (Claude Code's default) on /v1/messages"
+code="$(curl -s -m 120 -o /dev/null -w '%{http_code}' "$BASE/v1/messages" -H 'Content-Type: application/json' -d \
+  '{"model":"qwen3.8-flash-next","max_tokens":1,"messages":[{"role":"user","content":"hi"}],"output_config":{"effort":"high"}}' || true)"
+case "$code" in
+  200) echo "   OK" ;;
+  400) echo "   HTTP 400: the chat template rejects effort=high (serve with EFFORT_ALIAS=1)" ;;
+  404|405) echo "   skipped: this server has no /v1/messages endpoint (HTTP $code)" ;;
+  *) echo "   HTTP ${code:-no response}" ;;
+esac
+
 echo ">> prefill (TTFT on a ~8k-token prompt), then determinism + prefix-cache hit on the same prompt"
 python3 - "$BASE" <<'PY'
 import json,sys,time,urllib.request,random

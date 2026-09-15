@@ -5,11 +5,11 @@ active) — on **one NVIDIA DGX Spark / ASUS GX10** with **vLLM**, at full prefi
 speed, with MTP speculative decoding, **working prefix caching**, **deterministic
 greedy decoding**, and up to **500k tokens of context**.
 
-The catch this repo solves: the NVFP4 checkpoint is **126 GiB**, which does not fit
+The catch this repo solves: the NVFP4 checkpoint is **~125 GiB**, which does not fit
 next to a usable KV cache in the Spark's **128 GB unified pool**. 48 GiB of that is
 the n-gram embedding ("PLE") table — a pure lookup that a token only touches 16 rows
 of. This repo patches the official vLLM image to **serve that table from NVMe via
-`mmap`** instead of keeping it resident. Weights drop to **~76 GiB**, the rest of the
+`mmap`** instead of keeping it resident. Weights drop to **~75 GiB**, the rest of the
 pool goes to KV, and everything runs on stock GB10 kernels.
 
 Along the way it also fixes two things that were broken for this model on GB10 —
@@ -23,9 +23,9 @@ kernel that drops candidates) — and offers an optional **hybrid** checkpoint l
 ```bash
 git clone https://github.com/blazux/qwen3.8-Flash-DGX.git && cd qwen3.8-Flash-DGX
 ./flash doctor      # docker, GPU, memory, disk, port, image, weights: tells you what is missing
-./flash setup       # builds the image, downloads the checkpoint (126 GiB, resumable), prepares the hybrid layout
+./flash setup       # builds the image, downloads the checkpoint (NVIDIA's NVFP4, 124 GiB via Xet, resumable), prepares the hybrid layout
 ./flash serve       # the recommended recipe (profile "default"): hybrid, 500k context, deterministic
-./flash wait        # first boot loads ~76 GiB of weights, 8-13 min; prints the KV pool when the API is up
+./flash wait        # first boot loads ~75 GiB of weights, 8-13 min; prints the KV pool when the API is up
 ./flash test        # health, coherence, prefix-cache hit, determinism, tok/s
 ```
 
@@ -37,8 +37,8 @@ be overridden on the command line (`./flash serve default MTP=3 PORT=18301`). `.
 The same thing by hand, unchanged and still supported (everything `flash` does is these scripts):
 
 ```bash
-docker build -t qwen38-flash-dgx .            # ~1 min: official vLLM image + the 11 patches below
-scripts/download-weights.sh                   # RadixArk NVFP4 checkpoint, ~126 GiB, resumable (one-time)
+docker build -t qwen38-flash-dgx .            # ~1 min: official vLLM image + the 12 patches below
+scripts/download-weights.sh                   # nvidia/Qwen3.8-Flash-Next-NVFP4, ~124 GiB via Xet, resumable (one-time)
 scripts/prepare-hybrid.sh                     # recommended: fp8 side layers, +20% decode, same quality (~10 min, one-time)
 MODE=hybrid YARN=1 CTX=500000 scripts/serve.sh   # the recipe our own box runs; 500k context, ~13 min to load
 docker logs -f qwen38-flash                   # ready at "Application startup complete"
@@ -48,8 +48,12 @@ scripts/smoke-test.sh                         # health, coherence, prefix-cache 
 OpenAI-compatible API on `http://localhost:18300/v1`, model name `qwen3.8-flash-next`,
 tool calling and reasoning parsers on. Every default is the setting that scored best on our
 agentic tournament (see [How the defaults are chosen](#how-the-defaults-are-chosen-quality-first-speed-as-an-option));
-what you get on a GX10: ~37 tok/s single-stream decode, ~2,500–3,000 tok/s prefill, prefix
-caching, deterministic greedy output, 500k tokens of context. Want the checkpoint exactly as
+what you get on a GX10: ~34 tok/s single-stream decode, ~2,500–2,800 tok/s prefill, a ~680k-token
+KV pool, prefix caching, deterministic greedy output, 500k tokens of context. The checkpoint is
+**NVIDIA's own NVFP4 quantization** since 2026-09-14 (it replaced RadixArk's after a 5-pass head-to-head:
+same or better quality, +15–22% KV, −8% single-stream decode — the whole story is in
+[Checkpoints](#checkpoints-nvidias-nvfp4-default-and-radixarks)); RadixArk's is one variable away,
+`MODEL=RadixArk/Qwen3.8-Flash-Next-NVFP4`, same recipe, same image. Want the checkpoint exactly as
 published? Drop `prepare-hybrid.sh` and `MODE=hybrid`. Want speed over the last percent of
 quality? `MTP=3`, and `MODE=hybrid-mtp` for more KV — both explained in the [options table](#how-the-defaults-are-chosen-quality-first-speed-as-an-option).
 Prefer the current vLLM release to the preview image? `docker build -f Dockerfile.v0.29 -t qwen38-flash-dgx:v0.29 .`
@@ -83,9 +87,76 @@ patch --batch --forward --fuzz=0 -p1 < /path/to/qwen3.8-Flash-DGX/src/patches/qw
 .venv/bin/python -m pytest tests/parser/engine -q
 ```
 
-## Update 2026-09-11 — what changed
+## Update 2026-09-14 — NVIDIA's checkpoint is the default
+
+- **`MODEL` now defaults to `nvidia/Qwen3.8-Flash-Next-NVFP4`** in `flash`, `serve.sh`, `download-weights.sh`
+  and `prepare-hybrid.sh`. RadixArk's checkpoint, the default until now, stays fully supported:
+  `MODEL=RadixArk/Qwen3.8-Flash-Next-NVFP4` on any of them (or `./flash setup default MODEL=…`), nothing
+  else changes. Already running RadixArk? Nothing breaks: the variable was always honoured, and the
+  recipe, patches and profiles are identical for both.
+- **Why**: a head-to-head on 2026-09-13/14 — same image (`main`), same recipe, only the checkpoint
+  changed, 5 full passes of a 55-scenario agentic tournament per side plus speed, memory, long-context
+  and determinism probes on the same boot. NVIDIA 88.8% ± 1.0 vs RadixArk 86.1% ± 1.9; behind on no
+  scenario beyond one-run noise; reasoning-runaway rate identical; needle 6/6 to 413k and deterministic
+  on both; KV pool +15% on that boot (679k vs 589k tokens, +22% on another); single-stream decode −7 to
+  −8% (34.5 vs 37.1 tok/s), equal under load. The default rule of this repo is quality first: at parity
+  or better, the checkpoint with more KV room and the vendor's own export wins. Numbers, protocol and
+  the honest caveats: [Checkpoints](#checkpoints-nvidias-nvfp4-default-and-radixarks).
+- **What it costs you**: ~3 tok/s of single-stream decode against RadixArk, and a 124 GiB download in
+  24 files, one of them 50 GiB, that only comes through Xet (the default of `download-weights.sh`
+  since PR #19). On the v0.29 image the fp8 MTP drafter loads through the vllm#55513 backport; on the
+  preview image through the stopgap shim — both validated.
+- **`MODE=hybrid-mtp` (the NVFP4 draft-experts graft, profile `context`) is RadixArk-only** and now
+  says so: NVIDIA's drafter is already fp8, which is exactly where its KV advantage comes from. The
+  `context` profile pins `MODEL=RadixArk/…` for that reason.
+- **`reasoning_effort: high` no longer returns 400** (`EFFORT_ALIAS=1`, default). The chat template all
+  these checkpoints share — NVIDIA's, RadixArk's and the abliterated copies — accepts only `xhigh` (its
+  default), `medium` and `low`, and raises on anything else. vLLM passes the request's effort straight
+  through (on `/v1/messages`, `output_config.effort`), and Claude Code sends `high` by default, so every
+  such request failed with `Unexpected reasoning effort high`. `serve.sh` now serves a copy of the
+  checkpoint's own template with its one effort-resolving line rewritten: `high` and `max` → `xhigh`,
+  `minimal` → `low`. Every other value renders byte-identically, and a template without that check or
+  that line is left alone. The copy is bind-mounted into the container from the first writable of the HF
+  cache, `~/.cache/qwen38-flash-dgx/` and the checkout: an HF cache first created by a manual `docker run`
+  belongs to root, and the alias must not silently degrade to the old 400 there (`./flash doctor` now
+  warns about such a cache).
+- **`FAST_ROWS=0`: every PLE gather goes to the thread pool** (new default). The mmap patch gathered
+  decode-sized batches (≤ 512 unique rows) inline on one thread, so every row the page cache had dropped
+  was its own serial page fault — and on a Spark the 48 GiB table never fits in cache. Measured within
+  one boot (drowzeys' NVIDIA-based checkpoint, v0.29, hybrid, MTP=3, `vm.swappiness=10`), the path
+  switched at runtime in ABBA-BAAB phases with fresh prompts each phase: **1 stream 35.1 → 37.9 tok/s
+  (+8%)**, gather 11.4 → 5.0 ms; **4 streams 68.0 → 79.4 tok/s aggregate (+17%)**, gather 36.4 → 11.5 ms,
+  every pool phase ahead of every inline phase. The rows gathered are the same either way, so outputs do
+  not change. `FAST_ROWS=512` restores the old path, which is ~0.8 ms faster per gather only when every
+  row is already cached.
+
+## Update 2026-09-13 — what changed
 
 Newest first. If you cloned this before, this is the short version; details in the linked sections.
+
+**2026-09-13** — NVIDIA's own NVFP4 checkpoint runs on the recipe, and three contributed options:
+
+- **`nvidia/Qwen3.8-Flash-Next-NVFP4` is supported** (issue #17, [@PathosEthosLogos](https://github.com/PathosEthosLogos)).
+  Same recipe, `MODEL=nvidia/Qwen3.8-Flash-Next-NVFP4`; the hybrid layout works on it unchanged. It needed
+  patch 11 (its MTP drafter's experts are blockwise fp8 under a ModelOpt *mixed-precision* config that
+  vLLM 0.29 does not know how to load) and the hybrid shim extended to that config class. Patch 11 started
+  as a stopgap shim; on the v0.29 image it is now a backport of vLLM's own fix (vllm#55513, by
+  @techfury90), and only the preview image keeps the shim. Measured against
+  RadixArk at equal recipe: **quality at parity, needle 6/6 on both up to 413k, decode 34.0 vs 36.4 tok/s,
+  KV pool +22–28% (721k tokens)**. The default stayed RadixArk that day; the 5-pass head-to-head of
+  the next night made NVIDIA the default (see the 2026-09-14 update above).
+  → [Checkpoints](#checkpoints-nvidias-nvfp4-default-and-radixarks)
+- **Download knobs, PLE counters, `KV_CACHE_MEM`** — [@techfury90](https://github.com/techfury90)'s PR #19:
+  `XET`/`EXCLUDE`/`MAX_WORKERS` for `download-weights.sh`, five `vllm:ple_mmap_*` Prometheus counters
+  (opt-in export with `PROM_MULTIPROC=1`), and `KV_CACHE_MEM` for an explicit KV budget. All verified live.
+  We flipped **Xet on by default** right after: the Hub no longer serves files over 50 GB through the plain
+  path, and NVIDIA's PLE table is one 50 GiB shard. → [Watching the mmapped table](#watching-the-mmapped-table-vllmple_mmap_)
+- **`COMPILE_CACHE`** — [@AronRubin](https://github.com/AronRubin)'s PR #21 keeps vLLM's compiled graphs in
+  docker volumes across boots: **init engine 122 s → 41 s** on our box (compilation 34 s → 0.5 s), outputs
+  identical. Opt-in; worth it whenever something recreates the container for you.
+  → [Persistent compile cache](#optional-persistent-compile-cache-compile_cache)
+- `./flash doctor` now reports a checkpoint as **incomplete** when a shard named by the index is missing
+  (an interrupted download leaves dangling symlinks and everything looks present).
 
 **2026-09-12** — one command for newcomers, nothing removed for everyone else:
 
@@ -222,9 +293,10 @@ full comparison tables are in [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md).*
 
 ## How the defaults are chosen: quality first, speed as an option
 
-Every default in `scripts/serve.sh` is the setting that scored best on our **17-scenario
-agentic tournament** (tool loops, long-context extraction, multi-step reasoning; 3 repeats,
-temperature 0.2), run on the GX10 with one variable changed at a time, on the same day. A
+Every default in `scripts/serve.sh` is the setting that scored best on our **agentic
+tournament** (tool loops, long-context extraction, multi-step reasoning, hidden-test coding;
+17 scenarios when the recipe was built, 55 for the checkpoint decision; 3–5 repeats, temperature
+0.2), run on the GX10 with one variable changed at a time, on the same day. A
 change that only buys tok/s or TTFT and costs even a point there ships as an **option**, off
 by default, with its measured cost next to it. Two runs of the same configuration differ by
 up to 2 points day to day, so anything inside that band is treated as equal and the faster
@@ -232,6 +304,7 @@ one wins; anything below it stays an option.
 
 | what | default | measured effect (GX10, hybrid, MTP=2, prefix caching, YaRN 500k) |
 |---|---|---|
+| Checkpoint (`MODEL`) | **`nvidia/Qwen3.8-Flash-Next-NVFP4`** (since 2026-09-14) | vs RadixArk, 5 × 55 scenarios: 88.8% ± 1.0 vs 86.1% ± 1.9, runaway rate equal, needle and determinism equal; +15–22% KV pool, −8% single-stream decode |
 | Hybrid checkpoint (`MODE=hybrid`) | recommended, `nvfp4` as published is the default | +20% decode, +8% KV, same tournament score |
 | Deterministic top-k kernel (`DET_TOPK=1`) | **on** | identical greedy outputs, full prefill speed, tournament neutral (44/51) |
 | Reduced draft vocabulary (`DRAFT_VOCAB=1`) | **on** | +20% decode, tournament 45/51 (the best run), outputs unchanged by construction |
@@ -242,6 +315,7 @@ one wins; anything below it stays an option.
 | fp8 KV cache (`KV_DTYPE=fp8_e4m3`) | option | ×1.9 KV pool, 1M context; −10% decode, −30% prefill, one scenario lost |
 | M%4 GEMM padding (`PAD_M4=1`) | option | no-op with prefix caching on; −40% TTFT at 8k with it off |
 | Exact `torch.topk` (`EXACT_TOPK=1`) | fallback | deterministic like the kernel, −20–40% long prefill |
+| Persistent compile cache (`COMPILE_CACHE`) | option | −80 s ± 2 s of init engine per boot after the first; startup only, outputs and tournament unaffected |
 | `--long-prefill-token-threshold` (via `EXTRA`) | option | keeps decoding clients responsive under concurrent prefills, at a TTFT cost |
 
 If your priority is raw throughput rather than the agent's reliability, the fast profile is
@@ -291,6 +365,33 @@ to `qwen38-flash` and `18300`, like `serve.sh`.
 - The base image is multi-arch, so `docker build` also works on x86 Blackwell
   (sm_120, e.g. RTX PRO 6000) for testing, though this is tuned for the Spark.
 
+**Download speed.** `scripts/download-weights.sh` uses the Hugging Face Xet backend (`XET=1`,
+the default). It used to be off because it stalled on some Spark setups, but the Hub now
+refuses to serve files over 50 GB through the plain path at all — the NVIDIA checkpoint's PLE
+table is one 50 GiB shard, and the error it prints ("install hf_xet") is misleading, hf_xet is
+in the image. Xet is also much faster: `--max-workers` parallelises across *files*, so a
+checkpoint that is a dozen large shards leaves most of a gigabit idle over plain HTTPS.
+Measured by [@techfury90](https://github.com/techfury90) on a DGX Spark on gigabit fibre,
+pulling 81 GB (we saw the same ~105 MB/s on ours):
+
+| | rate | 81 GB takes |
+|---|---|---|
+| plain HTTPS, 8 workers (default) | 14.7 MB/s (117 Mbit/s) | ~92 min |
+| `XET=1` | **101 MB/s (809 Mbit/s)** | **13.4 min** |
+
+`XET=0` falls back to plain HTTPS if Xet stalls for you. One caveat seen once: a Xet run
+ended in an `httpx.ReadTimeout` *after* the last file completed — every blob was intact, but
+the exit code was non-zero. Re-run to confirm; it is resumable, and a finished download
+re-checks in seconds. `./flash doctor` tells you if an essential file (tokenizer, configs) or a
+shard named by the index is missing.
+
+**Do not run `prepare-hybrid.sh` on an unfinished download.** The hybrid layout is a copy of the
+snapshot as it is at that moment; prepared too early it lacked `tokenizer.json`, and vLLM then died
+on *"Couldn't instantiate the backend tokenizer… sentencepiece"* (issue #17 — nothing is missing
+from the image). Since 2026-09-14 the script refuses an incomplete snapshot and, run again on an
+existing layout, repairs it by adding whatever the snapshot has gained; `serve.sh` and `flash`
+check the layout too and print that fix instead of vLLM's message.
+
 ## Quickstart
 
 The commands are in the [TL;DR](#tldr--run-it-on-a-dgx-spark) at the top. Once the log says
@@ -310,8 +411,9 @@ tokens); `GPU_MEM=0.80` is the long-running-service setting, see [Tuning](#tunin
 
 ## Two checkpoint modes: NVFP4 or hybrid
 
-`scripts/serve.sh` serves one of two layouts of the same RadixArk NVFP4 checkpoint;
-pick with `MODE=`.
+`scripts/serve.sh` serves one of two layouts of the same NVFP4 checkpoint (NVIDIA's by default,
+RadixArk's with `MODEL=`); pick with `MODE=`. The table below was measured on RadixArk's checkpoint;
+on NVIDIA's the same conversion takes decode from ~28 to ~34 tok/s and the KV pool from ~565k to ~680k.
 
 | | `MODE=nvfp4` (default) | `MODE=hybrid` |
 |---|---|---|
@@ -342,9 +444,11 @@ MODE=hybrid YARN=1 CTX=500000 GPU_MEM=0.80 scripts/serve.sh
 Our own box runs the hybrid. If you want the checkpoint exactly as published, stay on
 `MODE=nvfp4` — you lose ~5 tok/s and nothing else.
 
-### NVFP4 MTP draft experts (`MODE=hybrid-mtp`)
+### NVFP4 MTP draft experts (`MODE=hybrid-mtp`, RadixArk only)
 
-A graft on top of the hybrid: the MTP draft head's routed experts (BF16 fused, ~4.7 GiB)
+**RadixArk only**: NVIDIA's checkpoint already ships its MTP drafter in fp8 (that is where its KV
+advantage comes from), so there is nothing to graft and `MODE=hybrid-mtp` refuses it; the `context`
+profile pins `MODEL=RadixArk/…` for that reason. A graft on top of the RadixArk hybrid: the MTP draft head's routed experts (BF16 fused, ~4.7 GiB)
 are replaced by the **NVFP4** draft experts from
 [Inferact/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/Inferact/Qwen3.8-Flash-Next-NVFP4)
 (1.4 GiB) — the combination neither parent ships: fp8 PLE table *and* a cheap draft.
@@ -479,6 +583,45 @@ chunks:
 `PAD_M4=1` also sets `VLLM_FP8_PAD_M4=1`; `scripts/serve.sh` always passes the variable because
 the patch itself defaults to on when it is unset. NVFP4 mode does not use this GEMM.
 
+## Optional: persistent compile cache (`COMPILE_CACHE`)
+
+`scripts/serve.sh` recreates the container on every run (`docker rm -f`, then `docker run`), so
+vLLM's compiled graphs — written to `/root/.cache/vllm` inside the container — are discarded and
+rebuilt on every boot. If you keep one container and cycle it with `./flash stop` / `./flash start`
+this costs nothing, which is why it went unnoticed. It costs you when something else recreates the
+container for you: a proxy that loads and evicts models on demand (llama-swap and friends), CI, or
+a tournament run that calls `serve.sh` between configurations.
+
+`COMPILE_CACHE=<name>` mounts two docker volumes (`<name>-vllm`, `<name>-flashinfer`) over the two
+cache directories. `COMPILE_CACHE=/some/path` binds `/some/path/vllm` and `/some/path/flashinfer`
+instead, to put them on a chosen disk. Unset — the default — is exactly the behaviour above.
+
+Measured on a GX10, hybrid + YaRN 500k + MTP=2, same recipe each time. **Boot totals are not usable
+for this**: weight loading varied between 464 s and 554 s on page-cache state alone, and CUDA-graph
+capture between 4 s and 13 s, both larger than the effect being measured. The signal is in init
+engine with capture excluded, one row per boot:
+
+| boot | init engine | capture | init engine − capture | `torch.compile` |
+|---|---|---|---|---|
+| 1 — unset (default) | 129.2 s | 13 s | 116.2 s | 37.9 s |
+| 2 — set, populating | 125.5 s | 10 s | 115.5 s | 37.5 s |
+| 3 — set, reused | 41.1 s | 4 s | 37.1 s | 4.2 s |
+| 4 — set, reused, Triton volume emptied | 50.2 s | 13 s | 37.2 s | 0.7 s |
+| 5 — set, reused, final two-mount config | 37.3 s | 4 s | 33.3 s | 0.7 s |
+
+Reused (boots 3–5) is **35.9 s ± 2 s**, against **116.2 s** with the cache off: **−80 s ± 2 s
+(−69%)** per boot. Populating it costs nothing (boot 2 at 115.5 s against boot 1 at 116.2 s).
+Reused boots log `Directly load AOT compilation from path …`. Disk: 168 MB for the vLLM cache,
+0.5 MB for FlashInfer. Startup only — no effect on outputs, so nothing for the tournament to say.
+
+**Triton's `/root/.triton` is deliberately not persisted.** It looks like it should be the
+interesting one: `jit_monitor` warns that five kernels (`_qsa_mqa_paged_kernel`,
+`_qsa_sparse_paged_gqa_splitk`, `_compute_local_logits_stats_`, `_rejection_kernel`,
+`_resample_kernel`) JIT-compile *during the first request*. Boot 4 above tested it directly — vLLM
+cache warm, only the Triton volume emptied — and came out at 37.2 s against boot 3's 37.1 s: a
+0.2 s difference, an order of magnitude below the capture noise. The five warnings appear in every
+boot either way, warm or cold. Mounting it would have been cargo cult.
+
 ## Reduced draft vocabulary (`DRAFT_VOCAB=1`, default)
 
 vLLM shares the target model's `lm_head` with the MTP draft, so every draft step scores all
@@ -540,6 +683,7 @@ What changes in the patch set:
 | 6 hybrid dispatch, 10 reduced draft vocabulary | needed | needed, re-targeted |
 | 7 fp8 KV cache | opt-in | **not ported yet** — `KV_DTYPE` must stay `auto`, serve.sh refuses otherwise |
 | 9 `M%4` padding | opt-in | **in the release (vllm#52775), dropped**; `PAD_M4` is a no-op there |
+| 11 block-FP8 MTP experts in mixed ModelOpt checkpoints | FP8_BLOCK_SCALES shim (`src/vllm_modelopt_block_moe.py`) | **vllm#55513 backported** in place of the shim: NVIDIA-base checkpoints can use MTP; a no-op for RadixArk's |
 
 Two things got simpler on the release: the Inductor int64-indexing assert that forced
 `torch.compile` off on the preview image is gone (compile is on, graphs stay PIECEWISE
@@ -567,6 +711,92 @@ boot-to-boot range of the preview image). **The preview `Dockerfile` remains the
 field time on our own box; if you want to be on the release line, it is ready and tested.
 Full port notes in [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md#the-vllm-v0290-port-dockerfilev029).
 
+## Checkpoints: NVIDIA's NVFP4 (default) and RadixArk's
+
+Two NVFP4 quantizations of Qwen3.8-Flash-Next fit this recipe, and the recipe does not care which
+one it serves: `MODEL=<org/name>` on `download-weights.sh`, `prepare-hybrid.sh` and `serve.sh` (or
+`./flash setup default MODEL=…` then `./flash serve`). Both have NVFP4 routed experts, the fp8 PLE
+table this whole repo is about, and bf16 side layers that `prepare-hybrid.sh` converts to blockwise fp8
+the same way (the 300 side tensors are the same weights, down to the conversion error); the
+deterministic top-k, the reduced draft vocabulary, prefix caching and YaRN apply identically.
+
+- **[nvidia/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4)** — **the
+  default since 2026-09-14.** NVIDIA's own ModelOpt export (issue #17, @PathosEthosLogos). 124 GiB in
+  24 files, one of them a 50 GiB PLE shard that only downloads through Xet (`download-weights.sh` uses
+  Xet by default). Its MTP drafter keeps its experts in blockwise fp8 under a ModelOpt *mixed-precision*
+  config; vLLM 0.29 could not load that (no method for those experts, and the layer index of the
+  drafter not remapped), which is patch 11: on the v0.29 image a backport of vLLM's own fix
+  (vllm#55513, `src/patch_block_fp8_mtp.py`, @techfury90), on the preview image the stopgap shim
+  (`src/vllm_modelopt_block_moe.py`). Validated on both images.
+- **[RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4)** — the
+  default until 2026-09-14, the checkpoint every number in the sections above was measured on. 122 GiB
+  in 418 files, plain ModelOpt NVFP4 config, bf16 MTP drafter (hence the `hybrid-mtp` graft, which only
+  exists for it). Fully supported, one variable away:
+
+```bash
+MODEL=RadixArk/Qwen3.8-Flash-Next-NVFP4 scripts/download-weights.sh
+MODEL=RadixArk/Qwen3.8-Flash-Next-NVFP4 scripts/prepare-hybrid.sh
+MODEL=RadixArk/Qwen3.8-Flash-Next-NVFP4 MODE=hybrid YARN=1 CTX=500000 scripts/serve.sh
+#   or: ./flash setup default MODEL=RadixArk/Qwen3.8-Flash-Next-NVFP4 && ./flash serve default MODEL=RadixArk/Qwen3.8-Flash-Next-NVFP4
+```
+
+### Why the default changed: the head-to-head (2026-09-13/14)
+
+The rule of this repo is quality first; a default only moves on measured data, never on a smoke test.
+So the two checkpoints were run through the same protocol, back to back, on the same box:
+
+- **same image** (`qwen38-flash-dgx`, v0.29 base, the tree of `main`), **same recipe** (hybrid,
+  deterministic top-k, draft vocab 65k, MTP=2, YaRN 500k, prefix caching), **only `MODEL` differs**;
+- one boot per checkpoint; on that boot: speed, memory, long-context and determinism probes, then
+  **5 full passes of the agentic tournament** — 55 scenarios (tool loops with injected faults,
+  long ledgers, logic grids, calendar and org-chart deduction, hidden-test coding), temperature 0.2,
+  32k reasoning tokens per turn, partial credit on multi-item scenarios — then a dedicated block on
+  the four coding tasks where this model's reasoning most often runs away (10 samples each);
+- 16 h of GPU time, 275 scored runs per side, every trajectory kept.
+
+| | RadixArk hybrid + MTP=2 | **NVIDIA hybrid + MTP=2 (default)** |
+|---|---|---|
+| tournament, 5 passes × 55 scenarios | 86.1% ± 1.9 (85.7 / 84.2 / 88.1 / 88.1 / 84.5) | **88.8% ± 1.0** (89.0 / 89.0 / 87.2 / 89.0 / 89.9) |
+| items lost on the 46 scenarios that never run away (230 runs) | 4.1 | **0.7** |
+| reasoning runaways (32k-token cap), all coding tasks | 49/65 | 46/65 (p = 0.55: equal) |
+| scenarios where one side is behind | none for RadixArk beyond one-run noise on g9 | none for NVIDIA |
+| needle 100k / 185k / 323k / 413k | 4/4 found | 4/4 found |
+| deterministic at temperature 0 | yes | yes |
+| decode, single stream, greedy prose | **37.1 tok/s** | 34.5 tok/s (−7%) |
+| decode per stream, 4 concurrent agents | 21.6 tok/s | 22.1 tok/s |
+| prefill 8k / 32k (cold) | 5.1 s / 10.6 s | 5.0 s / 11.3 s |
+| prefill at 185k / 323k / 413k | 1,919 / 2,497 / 2,856 tok/s | 1,857 / 2,465 / 2,782 tok/s |
+| KV pool @500k, `GPU_MEM=0.80` | 589k tokens | **679k tokens (+15%)**; +22% on another boot |
+| weights loaded | 77.3 GiB | **74.9 GiB** |
+| download | 122 GiB, 418 files, HTTPS or Xet | 124 GiB, 24 files, **Xet required** (50 GiB shard) |
+
+How to read it, honestly:
+
+- The 2.7-point gap is above the noise floor of a 5-pass design (bootstrap CI [+0.4, +5.3], permutation
+  p = 0.048) but about half of it is luck on the runaway-prone coding tasks, where both checkpoints
+  derail at the same rate. The half that is not luck is a handful of slips only RadixArk made: a
+  counting error on a paginated ledger (5 of 5 passes there, 8 of 18 across three images; NVIDIA 14 of
+  15), one fabricated tool trajectory, two mis-executed multi-step tool tasks. NVIDIA's only systematic
+  weakness in the data is a reporting convention (it under-counts a `total_moved` line while executing
+  the 30 operations perfectly).
+- The claim this data supports is **"parity or better on quality, +15–22% KV, −8% single-stream
+  decode, vendor checkpoint whose loading fix is upstream"** — not "NVIDIA is 2.7 points smarter".
+- Under that reading the default rule is unambiguous: at quality parity or better, the checkpoint that
+  leaves more room for context and concurrency, and that the next vLLM release will load with no patch
+  at all, is the one to ship. If your use is a single chat stream where 37 vs 34 tok/s is what you
+  feel, RadixArk keeps a small edge and is one variable away.
+
+Derivatives of either checkpoint in the same ModelOpt layout (abliterated variants such as
+`Jiunsong/SuperQwen3.8-Flash-Next-abliterated-NVFP4-DGX-Spark` or
+`drowzeys/keys-Qwen3.8-Flash-Next-NVFP4-dual-ablit-house-qsa-L3-47`) run with the same commands; we do
+not ship or endorse them, we only note that the recipe does not care. **Compressed-tensors derivatives**
+(`orcarouter/Qwen3.8-Flash-Next-Uncensored-NVFP4` and `lychee888/…-FP8PLE`, issue #23) are a different
+format: their quantization config lives in `config.json` (no `hf_quant_config.json`, which is fine, vLLM
+reads it from there) and their dense side layers are **already fp8**, so the hybrid step has nothing to
+convert — `prepare-hybrid.sh` and `flash doctor` say so and point to the `published` profile
+(`MODE=nvfp4`). The PLE table of the lychee888 build uses RadixArk's exact file and key layout, so the
+mmap patch should apply; we have not booted one ourselves.
+
 ## Tuning (env vars for `scripts/serve.sh`)
 
 | Var | Default | Notes |
@@ -577,7 +807,9 @@ Full port notes in [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md#the-vllm-v0290-po
 | `EXACT_TOPK` | `0` | `1` = exact `torch.topk` fallback (deterministic; −8% prefill at 8k, −20–40% at 32k+). Wins over `DET_TOPK` when set. |
 | `DRAFT_VOCAB` | `1` | MTP drafter scores only the 65,536 most frequent tokens (+20% decode, same tournament score, outputs unchanged). `0` = full vocabulary; a path = your own ids (`tools/build_draft_vocab.py`). |
 | `MADVISE` | `random` | `madvise` on the mmapped PLE table: `random` (no readahead: cold prefill −4–8%, cleaner page cache) or `normal`. |
+| `FAST_ROWS` | `0` | PLE gathers of up to this many unique rows run inline on one thread; larger ones are split across the `WORKERS` pool. `0` sends every gather to the pool, so page faults on rows the page cache dropped overlap instead of queueing: +8% decode at 1 stream, +17% aggregate at 4 streams, same rows (see the 2026-09-14 update). `512` = the old inline fast path, faster only when every row is already cached. |
 | `PAD_M4` | `0` | `1` = pad M%4 in the blockwise-fp8 GEMM (hybrid mode). No-op with `PREFIX_CACHE=1`; about −40% TTFT at 8k with `PREFIX_CACHE=0`. |
+| `EFFORT_ALIAS` | `1` | Accept every `reasoning_effort` a client can send. The checkpoints' template takes only `xhigh` (default), `medium` and `low` and 400s the rest — including Claude Code's default `high`. `1` serves a copy of the checkpoint's own template whose effort-resolving line maps `high`/`max` → `xhigh` and `minimal` → `low` (other values render byte-identically; the copy goes to the first writable of `$HF_CACHE/qwen38-flash-dgx/chat-templates/`, `~/.cache/qwen38-flash-dgx/chat-templates/` and `.cache/chat-templates/` in the checkout, and is bind-mounted into the container, so a root-owned HF cache does not disable it). Applied only when the template has that check and that exact line. `0` = the template as shipped. |
 | `PORT` | `18300` | API port |
 | `CTX` | `262144` | Max context. Native is 262144; with `YARN=1` up to `500000` is validated. |
 | `YARN` | `0` | `1` = YaRN rope scaling (factor 4, Qwen's recipe) for `CTX` > 262144. |
@@ -586,9 +818,68 @@ Full port notes in [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md#the-vllm-v0290-po
 | `MTP` | `2` | Speculative tokens from the model's MTP head (`0` = off). `3` is +7% decode but cost a point at the tournament (44 vs 45/51), so it stays an option. |
 | `KV_DTYPE` | `auto` | `auto` = bf16 (recommended). `fp8_e4m3` = ~1.9× KV pool, 1M context on one box, at −10% decode / −30% prefill and a measurable quality cost — see [fp8 KV cache](docs/HOW-IT-WORKS.md#fp8-kv-cache-on-the-qsa-path-opt-in) before using it. |
 | `PREWARM` | `0` | `1` streams the 48 GiB table once at boot to warm the page cache — steadier first-request latency, ~10 s extra startup. |
-| `WORKERS` | `32` | Threads used for the mmap gather (only used above `VLLM_PLE_MMAP_FAST_ROWS`=512 unique rows; decode-sized gathers run inline). |
+| `WORKERS` | `32` | Threads used for the mmap gather: every gather at the default `FAST_ROWS=0`; with `FAST_ROWS=512`, only gathers above 512 unique rows (decode-sized gathers then run inline). |
+| `COMPILE_CACHE` | | Keep vLLM's compiled graphs across boots — this script recreates the container every run, so by default they are rebuilt each time. `<name>` = two docker volumes, `/abs/path` = two bind mounts. **−80 s ± 2 s of init engine** per boot after the first, 169 MB of disk; only worth setting if something recreates the container for you (a model-swapping proxy, CI, tournament runs). See [above](#optional-persistent-compile-cache-compile_cache). |
 | `LOG_REQUESTS` | `0` | `1` logs every prompt and output (`VLLM_LOGGING_LEVEL=DEBUG --enable-log-requests --enable-log-outputs`) so `tools/vllm_watch.py` can show sessions live. Debugging only: it puts user content in the Docker log, unbounded. |
+| `PROM_MULTIPROC` | `0` | `1` runs prometheus_client in multiprocess mode so engine-side metrics (`vllm:ple_mmap_*`) reach `/metrics`. Opt-in, because it stops vLLM exporting its `*_created` samples; see *Watching the mmapped table* below. |
+| `KV_CACHE_MEM` | | Passed through as `--kv-cache-memory-bytes`. `GPU_MEM` is a fraction of *total* device memory, so it leaves whatever was already resident on the table; vLLM prints the exact figure it would accept at startup ("Replace gpu_memory_utilization config with `--kv-cache-memory=...`"). On a Spark that headroom is also what the page cache uses for the PLE table, so taking it is a trade, not free memory — watch `vllm:ple_mmap_gather_seconds_total` when you do. |
 | `EXTRA` | | Extra vLLM flags, passed verbatim — e.g. `--long-prefill-token-threshold 1024` for multi-client responsiveness (see [the concurrency section](#decoding-clients-stall-while-other-clients-prefill-the-long-prefill-token-threshold-slider)), `--api-key <secret>`. |
+
+### Watching the mmapped table (`vllm:ple_mmap_*`)
+
+The PLE table is the one component whose cost depends on runtime state rather than
+configuration: how much of its 47.7 GiB the page cache is holding decides your prefill
+speed, and that moves as the KV pool, the request mix and the OS all pull on the same
+unified memory. The module exports five counters so this is visible on a dashboard
+rather than only in a windowed log line that a container restart destroys:
+
+```
+vllm:ple_mmap_lookup_ops_total         lookups (hash + gather + H2D)
+vllm:ple_mmap_op_seconds_total         cumulative seconds in the lookup op, GPU wait included
+vllm:ple_mmap_gpu_wait_seconds_total   of which: waiting for GPU work queued ahead of the lookup (not PLE cost)
+vllm:ple_mmap_dedup_seconds_total      of which: copying the row ids to the host and deduplicating them
+vllm:ple_mmap_gather_seconds_total     of which: the row gather (disk reads)
+vllm:ple_mmap_stage_seconds_total      of which: staging the rows for the GPU (pinned copy, H2D launch)
+vllm:ple_mmap_rows_total               rows gathered
+vllm:ple_mmap_bytes_total              bytes read from the table
+```
+
+The lookup starts with a blocking copy of the row ids to the host, and that copy waits for every GPU
+kernel queued ahead of it: the n-gram hashing and the layers before the PLE layer. `op_seconds` therefore
+mixes their compute with the lookup's own cost (one prefill window read 165 ms per lookup, of which 8 ms
+was the gather). `gpu_wait_seconds` is that wait on its own, so `op − gpu_wait` is what the lookup itself
+costs the step. The periodic `PLE mmap stats` log line shows the same split at its end:
+`gpu-wait X ms/op, host Y ms/op (dedup, gather, stage)`.
+
+They are registered in the EngineCore process, so they only reach `/metrics` when
+prometheus_client runs in multiprocess mode. vLLM turns that on only for
+`api_server_count > 1`; `scripts/serve.sh` does it for the single-server setup used here when you opt in with
+`PROM_MULTIPROC=1`, by pointing `PROMETHEUS_MULTIPROC_DIR` at a fresh tmpfs.
+
+Switching to multiprocess mode was checked against a live server by diffing the
+complete `/metrics` before and after: vLLM's other 71 metric families are exported with
+identical label sets and no per-process `pid` label. The only loss is the 35
+`*_created` families, which prometheus_client does not export in multiprocess mode; that is why
+exporting the counters is opt-in, so nothing changes for existing dashboards unless you
+ask for it.
+
+The views worth graphing:
+
+```promql
+# host seconds per lookup: what the PLE lookup itself costs each step
+(rate(vllm:ple_mmap_op_seconds_total[5m]) - rate(vllm:ple_mmap_gpu_wait_seconds_total[5m]))
+  / rate(vllm:ple_mmap_lookup_ops_total[5m])
+# page-cache health: the share of the lookup's own time spent on disk
+rate(vllm:ple_mmap_gather_seconds_total[5m])
+  / (rate(vllm:ple_mmap_op_seconds_total[5m]) - rate(vllm:ple_mmap_gpu_wait_seconds_total[5m]))
+# NVMe read bandwidth from the table
+rate(vllm:ple_mmap_bytes_total[5m])
+```
+
+The disk share is the page-cache health signal. It climbs as the cache is squeezed and falls
+as the hot region settles in. Divide by `op_seconds` alone and it also moves with GPU load,
+which says nothing about the cache. Pair it with `Cached` from a node exporter, since nothing
+in vLLM's own metrics exposes the quantity that actually governs it. `VLLM_PLE_MMAP_PROMETHEUS=0` turns the counters off.
 
 ## Throughput and concurrency
 
@@ -687,8 +978,10 @@ From [@Saren-Arterius](https://github.com/Saren-Arterius)'s fork, merged here wi
   ([fla#953](https://github.com/fla-org/flash-linear-attention/issues/953)). Correctness, not speed.
 - **PLE gather hot path** — CPU dedup of row ids, a persistent pinned staging buffer with an
   async H2D copy, GPU-side expansion through the inverse index, and an inline fast path
-  for decode-sized batches (`VLLM_PLE_MMAP_FAST_ROWS`, default 512; larger gathers are split
-  into `VLLM_PLE_MMAP_CHUNK`=2048-row tasks across `WORKERS` threads). Also: bf16/f16 tables,
+  for decode-sized batches (`VLLM_PLE_MMAP_FAST_ROWS`, module default 512; larger gathers are split
+  into `VLLM_PLE_MMAP_CHUNK`=2048-row tasks across `WORKERS` threads). `serve.sh` now sets it to 0
+  (`FAST_ROWS`): on a Spark enough rows miss the page cache that overlapping their faults on the pool
+  wins, by 8% at 1 stream and 17% at 4. Also: bf16/f16 tables,
   `VLLM_PLE_MMAP_DIR` to serve the table from another directory, and a periodic
   `PLE mmap stats` log line (`VLLM_PLE_MMAP_STATS_SEC`, default 30).
 - **Mamba state-copy guard** — with [vllm#50729](https://github.com/vllm-project/vllm/pull/50729)
@@ -730,7 +1023,7 @@ Details: [results-radixark-vllm.md](https://github.com/jschmied/qwen38-flash-nex
 flash                             one-command front-end: doctor / setup / serve <profile> / wait / test / status …
 profiles/*.env                    named recipes for it (default, speed, context, context-1m, shared, published, native, v0.29)
 Dockerfile                        official vLLM Flash-Next preview image + the patches below (default)
-Dockerfile.v0.29                  same recipe on the vLLM v0.29.0 release (patches 3 and 9 dropped, 7 not ported)
+Dockerfile.v0.29                  same recipe on the vLLM v0.29.0 release (patches 3 and 9 dropped, 7 not ported, 11 is the vllm#55513 backport)
 src/vllm_ple_mmap.py              1. mmap PLE table (opaque splitting op)            VLLM_PLE_MMAP=1
                                      handles both layouts (preview forward_impl hook / v0.29 embedding swap)
 src/mamba_utils_guarded.py        3. vllm#50729 + bounds guard (drop-in mamba_utils.py)
@@ -742,14 +1035,20 @@ src/patch_qsa_exact_topk.py       5. exact, deterministic QSA top-k             
                                      pinned commit) — hybrid mode with prefix caching off
 src/patch_mtp_draft_vocab.py     10. reduced draft vocabulary for the MTP drafter          VLLM_MTP_DRAFT_VOCAB=<ids.npy>
 src/draft_vocab_65536.npy            the default 65,536-id set (tools/build_draft_vocab.py rebuilds it)
+src/patch_block_fp8_mtp.py       11. vllm#55513 backport: block-FP8 MTP experts in ModelOpt mixed checkpoints (v0.29 base)
 src/vllm_fp8_hybrid_modelopt.py   6. NVFP4 experts + fp8 side layers dispatch        VLLM_FP8_HYBRID=1
+                                     (patches the NVFP4 and the mixed-precision ModelOpt config classes)
+src/vllm_modelopt_block_moe.py   11. FP8_BLOCK_SCALES layers in ModelOpt mixed checkpoints (NVIDIA's MTP
+                                     experts) -> vLLM's block-fp8 MoE method. Preview base only; the v0.29
+                                     image uses the vllm#55513 backport instead           VLLM_MODELOPT_BLOCK_MOE=0 disables
 src/patch_qsa_fp8_kv.py           7. fp8_e4m3 KV cache on the QSA path (by @Nanetnounou) --kv-cache-dtype fp8_e4m3
 src/test_ple_mmap_cpu.py          CPU unit test for the gather (no GPU needed)
 src/test_qsa_exact_topk_cpu.py    CPU unit test for the exact top-k (no GPU needed)
+src/test_block_fp8_mtp_cpu.py     CPU unit test for the vllm#55513 backport (no GPU needed; v0.29 image)
 tools/fp8_convert.py              side-layer bf16 -> blockwise fp8 (by @Saren-Arterius)
-scripts/download-weights.sh
+scripts/download-weights.sh       MODEL (default nvidia/Qwen3.8-Flash-Next-NVFP4), EXCLUDE, MAX_WORKERS, XET
 scripts/prepare-hybrid.sh         one-time: build the -fp8hybrid snapshot
-scripts/prepare-mtp-graft.sh      one-time: graft the NVFP4 MTP draft experts onto it (MODE=hybrid-mtp)
+scripts/prepare-mtp-graft.sh      one-time: graft the NVFP4 MTP draft experts onto it (MODE=hybrid-mtp, RadixArk only)
 tools/vllm_watch.py               live per-session view of prompts / reasoning / outputs / stats (needs LOG_REQUESTS=1; @0x3dlux)
 scripts/serve.sh                  MODE=nvfp4|hybrid|hybrid-mtp, PREFIX_CACHE, DET_TOPK, DRAFT_VOCAB, MADVISE, EXACT_TOPK, PAD_M4, KV_DTYPE, YARN, ...
 scripts/smoke-test.sh             health, coherence, prefix-cache hit, determinism, tok/s
@@ -762,6 +1061,7 @@ Run the unit tests (no GPU):
 ```bash
 docker run --rm -v "$PWD/src:/t" -w /t --entrypoint python3 qwen38-flash-dgx test_ple_mmap_cpu.py
 docker run --rm -v "$PWD/src:/t" -w /t --entrypoint python3 qwen38-flash-dgx test_qsa_exact_topk_cpu.py
+docker run --rm -v "$PWD/src:/t" -w /t --entrypoint python3 qwen38-flash-dgx:v0.29 test_block_fp8_mtp_cpu.py
 ```
 
 ## Limitations & notes
@@ -786,6 +1086,10 @@ docker run --rm -v "$PWD/src:/t" -w /t --entrypoint python3 qwen38-flash-dgx tes
 
 ## Credits
 
+- Download knobs (Xet, `EXCLUDE`, `MAX_WORKERS`), the `vllm:ple_mmap_*` Prometheus counters and `KV_CACHE_MEM`:
+  **[@techfury90](https://github.com/techfury90)** (PR #19); also spotted the upstream fix for NVIDIA's fp8 MTP experts (vllm#55513).
+- `COMPILE_CACHE`, the persistent compile cache: **[@AronRubin](https://github.com/AronRubin)** (PR #21).
+- The pointer to NVIDIA's own NVFP4 checkpoint: **[@PathosEthosLogos](https://github.com/PathosEthosLogos)** (issue #17).
 - `tools/vllm_watch.py`, the live session viewer: **[@0x3dlux](https://github.com/0x3dlux)** (issue #12).
 - The nudge to port the recipe to the vLLM v0.29.0 release: **[@ChengYen-Tang](https://github.com/ChengYen-Tang)** (issue #14).
 
@@ -795,7 +1099,7 @@ docker run --rm -v "$PWD/src:/t" -w /t --entrypoint python3 qwen38-flash-dgx tes
   AGPL-3.0) and measured on this checkpoint.
 
 - Model: **Qwen team, Alibaba** — Qwen3.8-Flash-Next.
-- NVFP4 checkpoint: **[RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4)**.
+- NVFP4 checkpoints: **[nvidia/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4)** (the default since 2026-09-14) and **[RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4)** (the default before, still supported).
 - NVFP4 MTP draft experts (the `hybrid-mtp` graft donor): **[Inferact/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/Inferact/Qwen3.8-Flash-Next-NVFP4)**; the graft recipe follows
   [thavoc's graft write-up](https://gist.github.com/thavoc/d7083457f6f2d981f879670c34df34ab)
   and [Peuqui/mtp-quant-transplant](https://github.com/Peuqui/mtp-quant-transplant).

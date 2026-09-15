@@ -35,6 +35,7 @@ Knobs (env):
   VLLM_PLE_MMAP_WORKERS=32   gather threads (page faults overlap across threads)
   VLLM_PLE_MMAP_CHUNK=2048   rows per gather task
   VLLM_PLE_MMAP_MADVISE=random  madvise on the shard mmaps: random (default, no readahead) or normal
+  VLLM_PLE_MMAP_PROMETHEUS=1 0 = do not register the vllm:ple_mmap_* counters
   VLLM_PLE_MMAP_PREWARM=0    1 = stream the whole table once at load to fill the
                              page cache with whatever memory is free (harmless,
                              evictable; ~10 s at 4.7 GB/s)
@@ -169,9 +170,12 @@ class MmapPleTable:
         try:
             return self._gather(ids)
         finally:
-            _STATS["gather_ms"] += (_time.perf_counter() - t0) * 1e3
-            _STATS["rows"] += int(np.asarray(ids).size)
-            _STATS["bytes"] += int(np.asarray(ids).size) * self.row_bytes
+            dt = _time.perf_counter() - t0
+            n = int(np.asarray(ids).size)
+            _STATS["gather_ms"] += dt * 1e3
+            _STATS["rows"] += n
+            _STATS["bytes"] += n * self.row_bytes
+            _prom_add(gather_s=dt, rows=n, bytes=n * self.row_bytes)
 
     def _gather(self, ids: np.ndarray) -> np.ndarray:
         ids = np.ascontiguousarray(ids, dtype=np.int64).reshape(-1)
@@ -286,11 +290,23 @@ class _MmapNgramEmbedding(nn.Module):
                 dtype=self._zeros_dtype,
                 device=ids.device,
             )
+        import time as _time
+
+        wait_s = 0.0
+        if ids.device.type == "cuda":
+            # The blocking copy below would wait here anyway, for every kernel queued ahead of it.
+            # Synchronizing first adds no latency and keeps that GPU time out of the lookup's own.
+            ts = _time.perf_counter()
+            torch.cuda.current_stream(ids.device).synchronize()
+            wait_s = _time.perf_counter() - ts
+        t1 = _time.perf_counter()
         ids_np = ids.detach().to("cpu", non_blocking=False).numpy().reshape(-1)
         # Dedup on CPU, gather only unique rows, expand on the GPU: fewer disk
         # reads AND fewer H2D bytes (repeated n-grams are the common case).
         uniq, inverse = np.unique(ids_np, return_inverse=True)
+        t2 = _time.perf_counter()
         rows = table.gather(uniq)  # uint8 [U, row_bytes], fresh & writable
+        t3 = _time.perf_counter()
         u = rows.shape[0]
         buf = self._pinned_buf(u, table.row_bytes) if ids.device.type == "cuda" else None
         if buf is not None:
@@ -300,6 +316,11 @@ class _MmapNgramEmbedding(nn.Module):
             dev = torch.from_numpy(rows).to(ids.device)
         inv = torch.from_numpy(inverse.reshape(-1)).to(ids.device, non_blocking=True)
         out = dev.view(table.torch_dtype)[inv]
+        t4 = _time.perf_counter()
+        _STATS["wait_ms"] += wait_s * 1e3
+        _STATS["dedup_ms"] += (t2 - t1) * 1e3
+        _STATS["stage_ms"] += (t4 - t3) * 1e3
+        _prom_add(gpu_wait_s=wait_s, dedup_s=t2 - t1, stage_s=t4 - t3)
         return out.reshape(*ids.shape, self.embedding_dim)
 
 
@@ -389,9 +410,122 @@ def _read_scale(entry: tuple) -> torch.Tensor:
 _REGISTRY: dict[str, nn.Module] = {}
 _OP_NAME = "ple_mmap_lookup"
 
-# Aggregate gather-overhead stats, logged every VLLM_PLE_MMAP_STATS_SEC seconds
-# (0 = off). op_ms covers hashing + gather + H2D; gather_ms just the disk reads.
-_STATS = {"calls": 0, "op_ms": 0.0, "gather_ms": 0.0, "rows": 0, "bytes": 0}
+# Aggregate stats, logged every VLLM_PLE_MMAP_STATS_SEC seconds (0 = off). op_ms is wall time in the
+# lookup op, and the op starts with a blocking device->host copy of the row ids. That copy waits for
+# every kernel queued ahead of it on the stream: on v0.29 the n-gram hashing op and the layers before
+# the PLE layer, on the preview image the hashing inside the op. So op_ms mixes that GPU compute with
+# the lookup's own cost (a prefill window measured 165 ms/op of which 8 ms was the gather). The phases:
+#   wait_ms    stream synchronize before the copy: GPU work queued ahead, not PLE cost
+#   dedup_ms   copying the ids to the host and np.unique
+#   gather_ms  the row reads (page cache or NVMe)
+#   stage_ms   pinned-buffer copy, launching the H2D copy and the GPU-side expansion
+# op_ms - wait_ms is what the lookup itself costs the step.
+_STATS = {"calls": 0, "op_ms": 0.0, "gather_ms": 0.0, "rows": 0, "bytes": 0,
+          "wait_ms": 0.0, "dedup_ms": 0.0, "stage_ms": 0.0}
+
+# The same numbers as monotonic Prometheus counters, so the table's behaviour is
+# visible on a dashboard instead of only in the log line below (which is windowed,
+# reset every period, and destroyed with the container). Nothing else in this
+# recipe exposes how the mmapped table is coping: it is the one component whose
+# cost depends on runtime state (page-cache residency) rather than on config, so
+# it is exactly the thing worth graphing.
+#
+# These live in the EngineCore process, not the API server, so they only reach the
+# frontend's /metrics when prometheus_client runs in multiprocess mode: the API
+# server's MultiProcessCollector then aggregates what every process writes under
+# PROMETHEUS_MULTIPROC_DIR. vLLM only turns that on for api_server_count > 1;
+# scripts/serve.sh sets it when PROM_MULTIPROC=1 (opt-in). They are created lazily on first use,
+# because the env var must be set before the first metric is constructed.
+#
+# Derived views worth having:
+#   (rate(vllm:ple_mmap_op_seconds_total[5m]) - rate(vllm:ple_mmap_gpu_wait_seconds_total[5m]))
+#     / rate(vllm:ple_mmap_lookup_ops_total[5m])      host seconds per lookup (the PLE's own cost)
+#   rate(vllm:ple_mmap_gpu_wait_seconds_total[5m])
+#     / rate(vllm:ple_mmap_lookup_ops_total[5m])      GPU work queued ahead of the lookup, per lookup
+#   rate(vllm:ple_mmap_gather_seconds_total[5m])
+#     / (rate(vllm:ple_mmap_op_seconds_total[5m]) - rate(vllm:ple_mmap_gpu_wait_seconds_total[5m]))
+#                                                     fraction of the lookup's own time spent on disk
+#   rate(vllm:ple_mmap_bytes_total[5m])               NVMe read bandwidth from the table
+# The disk fraction is the page-cache health signal: it climbs as the cache is squeezed and falls as
+# the hot region settles in. Divide by op_seconds alone and it also moves with GPU load, which says
+# nothing about the cache.
+_PROM: dict[str, object] | None = None
+_PROM_TRIED = False
+
+
+def _prom() -> dict[str, object] | None:
+    """Prometheus counters, or None if unavailable. Never raises, tried once."""
+    global _PROM, _PROM_TRIED
+    if _PROM_TRIED:
+        return _PROM
+    _PROM_TRIED = True
+    if os.environ.get("VLLM_PLE_MMAP_PROMETHEUS", "1").lower() in ("0", "false", "no"):
+        return None
+    if not os.environ.get("PROMETHEUS_MULTIPROC_DIR"):
+        # The default. vLLM only enables multiprocess metrics for api_server_count > 1,
+        # and exporting these costs vLLM its *_created samples, so it is opt-in: say how
+        # to turn it on rather than warn about the expected configuration.
+        logger.info(
+            "PLE mmap: PROMETHEUS_MULTIPROC_DIR is unset, so the vllm:ple_mmap_* counters "
+            "stay in this process and will not appear on /metrics while the engine runs "
+            "in its own process. scripts/serve.sh exports them with PROM_MULTIPROC=1."
+        )
+    try:
+        from prometheus_client import Counter
+
+        _PROM = {
+            "ops": Counter(
+                "vllm:ple_mmap_lookup_ops_total",
+                "PLE mmap lookups (hash + gather + H2D) executed.",
+            ),
+            "op_s": Counter(
+                "vllm:ple_mmap_op_seconds_total",
+                "Cumulative seconds in the PLE mmap lookup op, including the GPU wait "
+                "(vllm:ple_mmap_gpu_wait_seconds_total).",
+            ),
+            "gather_s": Counter(
+                "vllm:ple_mmap_gather_seconds_total",
+                "Cumulative seconds in the PLE mmap row gather (the disk reads).",
+            ),
+            "rows": Counter(
+                "vllm:ple_mmap_rows_total",
+                "Rows gathered from the mmapped PLE table.",
+            ),
+            "bytes": Counter(
+                "vllm:ple_mmap_bytes_total",
+                "Bytes read from the mmapped PLE table (page cache or NVMe).",
+            ),
+            "gpu_wait_s": Counter(
+                "vllm:ple_mmap_gpu_wait_seconds_total",
+                "Cumulative seconds the lookup waited for GPU work queued ahead of it "
+                "(not PLE cost; subtract from op_seconds).",
+            ),
+            "dedup_s": Counter(
+                "vllm:ple_mmap_dedup_seconds_total",
+                "Cumulative seconds copying row ids to the host and deduplicating them.",
+            ),
+            "stage_s": Counter(
+                "vllm:ple_mmap_stage_seconds_total",
+                "Cumulative seconds staging gathered rows for the GPU (pinned copy, H2D launch).",
+            ),
+        }
+        logger.info("PLE mmap: Prometheus counters registered")
+    except Exception as exc:  # pragma: no cover - metrics must never break serving
+        logger.warning("PLE mmap: Prometheus counters unavailable: %s", exc)
+        _PROM = None
+    return _PROM
+
+
+def _prom_add(**kw: float) -> None:
+    """Best-effort counter increment; a metrics failure must not fail a request."""
+    p = _prom()
+    if not p:
+        return
+    try:
+        for key, value in kw.items():
+            p[key].inc(value)  # type: ignore[attr-defined]
+    except Exception:  # pragma: no cover
+        pass
 _STATS_LAST = [0.0]
 _STATS_SEC = _env_int("VLLM_PLE_MMAP_STATS_SEC", 30)
 
@@ -407,14 +541,19 @@ def _stats_log() -> None:
     s = _STATS
     if not s["calls"]:
         return
+    # The prefix up to "MiB read" is unchanged, for anything that already parses it.
+    n = s["calls"]
     logger.info(
         "PLE mmap stats (last %.0fs): %d ops, op %.0f ms total (%.2f ms/op), "
-        "gather %.0f ms total (%.2f ms/op), %d rows, %.1f MiB read",
-        elapsed, s["calls"], s["op_ms"], s["op_ms"] / s["calls"],
-        s["gather_ms"], s["gather_ms"] / s["calls"],
+        "gather %.0f ms total (%.2f ms/op), %d rows, %.1f MiB read, "
+        "gpu-wait %.2f ms/op, host %.2f ms/op (dedup %.2f, gather %.2f, stage %.2f)",
+        elapsed, n, s["op_ms"], s["op_ms"] / n,
+        s["gather_ms"], s["gather_ms"] / n,
         s["rows"], s["bytes"] / 2**20,
+        s["wait_ms"] / n, max(0.0, s["op_ms"] - s["wait_ms"]) / n,
+        s["dedup_ms"] / n, s["gather_ms"] / n, s["stage_ms"] / n,
     )
-    s.update(calls=0, op_ms=0.0, gather_ms=0.0, rows=0, bytes=0)
+    s.update(calls=0, op_ms=0.0, gather_ms=0.0, rows=0, bytes=0, wait_ms=0.0, dedup_ms=0.0, stage_ms=0.0)
 
 
 def _lookup_impl(
@@ -432,8 +571,10 @@ def _lookup_impl(
         None, input_ids, query_start_loc, ngram_context
     )
     output[: result.shape[0]].copy_(result.to(output.dtype))
+    dt = _time.perf_counter() - t0
     _STATS["calls"] += 1
-    _STATS["op_ms"] += (_time.perf_counter() - t0) * 1e3
+    _STATS["op_ms"] += dt * 1e3
+    _prom_add(ops=1, op_s=dt)
     _stats_log()
 
 
@@ -458,8 +599,10 @@ def _lookup_ids_impl(ngram_ids: torch.Tensor, output: torch.Tensor, layer_name: 
     layer = _REGISTRY[layer_name]
     rows = layer.ngram_embedding(ngram_ids)  # (N, heads, head_dim), table dtype (or zeros)
     output.copy_(rows.reshape(rows.shape[0], -1).to(output.dtype))
+    dt = _time.perf_counter() - t0
     _STATS["calls"] += 1
-    _STATS["op_ms"] += (_time.perf_counter() - t0) * 1e3
+    _STATS["op_ms"] += dt * 1e3
+    _prom_add(ops=1, op_s=dt)
     _stats_log()
 
 

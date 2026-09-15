@@ -3,7 +3,7 @@
 ## The memory problem
 
 Qwen3.8-Flash-Next is a sparse MoE with an unusual extra component: a **51B-parameter
-n-gram embedding table** (the paper calls it PLE / "Engram"). The `RadixArk` NVFP4
+n-gram embedding table** (the paper calls it PLE / "Engram"). The NVFP4
 checkpoint breaks down roughly as:
 
 | Component | Format | Size |
@@ -166,10 +166,13 @@ and makes decode numbers meaningless):
 3. **PLE gather hot path** in `src/vllm_ple_mmap.py`: dedup row ids on CPU (`np.unique`),
    gather only unique rows, stage them through a persistent pinned buffer with an async
    H2D copy, expand on the GPU via the inverse index; decode-sized gathers (≤
-   `VLLM_PLE_MMAP_FAST_ROWS`=512 unique rows) skip the thread pool. Also bf16/f16 tables,
-   `VLLM_PLE_MMAP_DIR`, and a periodic `PLE mmap stats` line — which shows where the
-   remaining decode cost is: ~6.5 ms of the ~9.5 ms per lookup is the disk gather
-   itself (the page cache holds only part of the 48 GiB table at `GPU_MEM=0.80`).
+   `VLLM_PLE_MMAP_FAST_ROWS` unique rows, module default 512) can skip the thread pool. Also
+   bf16/f16 tables, `VLLM_PLE_MMAP_DIR`, and a periodic `PLE mmap stats` line — which shows
+   where the remaining decode cost is: on that inline path ~6.5 ms of the ~9.5 ms per lookup
+   is the disk gather itself (the page cache holds only part of the 48 GiB table at
+   `GPU_MEM=0.80`). Those misses are why `serve.sh` now sets the threshold to 0 (`FAST_ROWS`):
+   on the pool their page faults overlap instead of queueing on one thread, measured at +8%
+   decode at 1 stream and +17% aggregate at 4 streams with the same rows gathered.
 
 ## Independent reproduction and the native offload path
 
@@ -188,7 +191,7 @@ aggregate throughput of ~267 tok/s at 48 streams with page-fault cost per token
 - vLLM recipe: <https://recipes.vllm.ai/Qwen/Qwen3.8-Flash-Next>
 - vLLM PR (Flash-Next support): <https://github.com/vllm-project/vllm/pull/53896>
 - vLLM v0.29.0 release (first official build with the model, as `qwen4_exp`): <https://github.com/vllm-project/vllm/releases/tag/v0.29.0> — see [the port notes](#the-vllm-v0290-port-dockerfilev029)
-- NVFP4 checkpoint: <https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4>
+- NVFP4 checkpoints: <https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4> (the default since 2026-09-14) and <https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4>
 - SGLang day-0 write-up (PLE offload mechanics): <https://www.lmsys.org/blog/2026-08-26-qwen-flash-next>
 
 ## Prefix caching: the root cause and the fix
@@ -348,7 +351,7 @@ reads the file through a separate descriptor and is unaffected.
 
 ## Hybrid mode: NVFP4 experts + blockwise-fp8 side layers
 
-The RadixArk checkpoint quantizes only the routed experts (ModelOpt NVFP4) and leaves
+Both NVFP4 checkpoints (NVIDIA's and RadixArk's) quantize only the routed experts (ModelOpt NVFP4) and leave
 the dense side layers — GDN `in_proj`/`out_proj`, QSA `q/k/v/o_proj`, shared experts,
 ~15 GiB — in bf16. Every decoded token reads all of them, so they set the decode
 bandwidth floor. `scripts/prepare-hybrid.sh` rewrites those 300 tensors as blockwise
@@ -527,6 +530,27 @@ port took and what it measures.
 - **7 (fp8 KV on the QSA path) is not ported yet.** The QSA Triton kernels moved and were
   edited upstream; the patch needs a re-derivation, not a path change. `scripts/serve.sh`
   refuses `KV_DTYPE≠auto` on this base rather than silently running bf16.
+- **11 differs by base; on this one it is a backport of vllm#55513.** NVIDIA's own checkpoint
+  needs it for MTP: the drafter's experts are blockwise fp8 under a mixed-precision config, and
+  v0.29.0 misses them in two ways (see
+  [NVIDIA's NVFP4 checkpoint](#nvidias-nvfp4-checkpoint-block-fp8-mtp-experts-under-a-mixed-precision-config-patch-11-temporary)).
+  `src/patch_block_fp8_mtp.py` applies the PR's two runtime changes. The draft config now moves
+  `quantized_layers` to the drafter's runtime index, as it already did `exclude_modules`, and the
+  mixed config sends `FP8_PB_WO` / `FP8_BLOCK_SCALES` experts to vLLM's own `Fp8MoEMethod` with a
+  block `Fp8Config`. It leaves out the PR's `has_blocked_weights` hunk: v0.29.0's mixed config has
+  no such method, and that gate only picks the CUDA `QuantFP8` op for speed, while the MoE path
+  quantizes its input with `per_token_group_quant_fp8` directly. RadixArk's checkpoint (quant_algo
+  `NVFP4`, no `quantized_layers`) is unaffected. The preview image keeps the FP8_BLOCK_SCALES shim.
+  Measured on a DGX Spark with an NVIDIA-base checkpoint (`MODE=nvfp4`, MTP=2):
+  - the draft experts load on vLLM's DeepGEMM FP8 MoE backend;
+  - draft acceptance is 70.9% over four greedy prompts (539 of 760 drafted tokens, identical on two builds);
+  - the KV pool is 517k–542k tokens at `GPU_MEM=0.80` across three boots;
+  - the smoke test's determinism and prefix-cache checks pass.
+
+  The hybrid layout works on it too. With `prepare-hybrid.sh`'s fp8 side layers (`MODE=hybrid`, which
+  sets `VLLM_USE_DEEP_GEMM=0`), the draft experts load on the Triton FP8 MoE backend and the KV pool
+  grows to 658,980 tokens. Draft acceptance on the same four prompts is 65.9% (382 of 580 drafted
+  tokens; the fp8 side layers change the greedy paths), and the smoke test passes.
 
 **Serving.** The splitting-op list changes names (`vllm::qwen4_exp_ple_short_conv`,
 `vllm::qwen4_exp_qsa_with_output`, and `vllm::qwen4_exp_compute_ple_ngram_ids` must be in
@@ -559,3 +583,43 @@ Verdict: parity in quality, speed and KV pool, and −3 points of draft acceptan
 not investigated. The preview `Dockerfile` stays the default and our production image for
 now; `Dockerfile.v0.29` is the tested path onto the release line, and will become the
 default once fp8 KV is ported and it has run in production for a while.
+
+## NVIDIA's NVFP4 checkpoint: block-fp8 MTP experts under a mixed-precision config (patch 11, temporary)
+
+`nvidia/Qwen3.8-Flash-Next-NVFP4` declares `quant_algo: MIXED_PRECISION` with a per-layer map:
+the routed experts are NVFP4 (as in RadixArk), the PLE table is FP8, and the MTP drafter's
+experts are **`FP8_BLOCK_SCALES`, group 128** — fp8 `weight` + fp32 `weight_scale_inv` per
+128×128 block, the DeepSeek-V3 layout — where RadixArk keeps them in bf16.
+
+vLLM 0.29's `ModelOptMixedPrecisionConfig` resolves per-layer algorithms but only maps FP8,
+FP8_PB_WO, NVFP4, W4A16_NVFP4 and MXFP8 to methods. Two things go wrong for the drafter: the
+map's key is `mtp.layers.0.mlp.experts` while vLLM builds the layer as
+`mtp.layers.<num_hidden_layers>.mlp.experts` (the model remaps `exclude_modules` for that
+offset but not `quantized_layers`), and even with the name matched there is no method for the
+algorithm. The layer is created unquantized (bf16 parameters) and weight loading dies with
+`Layer mtp.layers.48.mlp.experts has no parameter 'w2_weight_scale_inv'`.
+
+`src/vllm_modelopt_block_moe.py`, the shim the preview image still uses, fixes both at the layer:
+it hooks `RoutedExperts._get_quant_method`, reads `quantized_layers` from the served checkpoint,
+matches the drafter's entry by its tail (`.mlp.experts`) under either spelling of the index,
+and returns vLLM's own `Fp8MoEMethod` with `Fp8Config(weight_block_size=[128, 128])` — the
+same method DeepSeek-V3 checkpoints use. (A first version hooked the config class only; in
+practice the expert layer never reached it, hence the layer-level hook.) On the v0.29 base,
+before the backport below replaced it there, vLLM picked the DeepGEMM fp8 MoE backend for it on
+GB10 and it works: drafter acceptance 83–89%, decode 27.7 tok/s on the published layout and
+34.0 on the hybrid, deterministic, needle 6/6 to 413k. The shim is inert for checkpoints without
+`FP8_BLOCK_SCALES` layers, and `VLLM_MODELOPT_BLOCK_MOE=0` disables it.
+
+**On the preview image this shim is still a stopgap, not the fix.** The proper fix landed upstream
+as vllm#55513 (merged 2026-09-08, after the 0.29 release, and not yet in a release): a
+`quantized_layers` remap in the MTP and a block-fp8 MoE branch in the mixed config, at the source of
+both gaps. The v0.29 image carries a backport of it instead of the shim (patch 11 on that base,
+`src/patch_block_fp8_mtp.py`, by @techfury90, with a CPU test; see
+[the v0.29 port](#the-vllm-v0290-port-dockerfilev029)), and the shim is removed there. With the index
+remapped where it goes wrong, the expert layer reaches the config's method, so that base needs no
+layer-level hook.
+
+The hybrid layout needed one more change: `vllm_fp8_hybrid_modelopt.py` used to patch only
+`ModelOptNvFp4Config`; on the mixed config the fp8-converted side layers were caught by the
+checkpoint's exclude list and sent to the bf16 path. It now patches both classes.
+
