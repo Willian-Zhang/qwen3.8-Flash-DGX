@@ -25,6 +25,9 @@
 #   DRAFT_VOCAB=1     1 = the MTP drafter scores only the 65,536 most frequent tokens (+20% decode, same
 #                     tournament score); 0 = full vocabulary; a path = your own ids.npy (tools/build_draft_vocab.py)
 #   MADVISE=random    madvise on the mmapped PLE table: random (default; no readahead, cleaner page cache) or normal
+#   FAST_ROWS=0       PLE gathers of up to this many unique rows run inline on one thread, larger ones on the
+#                     WORKERS pool. 0 = every gather on the pool, so faults on rows the page cache dropped
+#                     overlap (+8% decode at 1 stream, +17% aggregate at 4, README); 512 = old inline path
 #   EFFORT_ALIAS=1    1 = accept reasoning_effort high/max (-> xhigh) and minimal (-> low): the checkpoint's
 #                     template only takes xhigh/medium/low and 400s the rest, including Claude Code's "high"
 #   LOG_REQUESTS=0    1 = log every prompt and output (VLLM_LOGGING_LEVEL=DEBUG, --enable-log-requests
@@ -68,6 +71,7 @@ EXACT_TOPK="${EXACT_TOPK:-0}"
 PAD_M4="${PAD_M4:-0}"
 DRAFT_VOCAB="${DRAFT_VOCAB:-1}"
 MADVISE="${MADVISE:-random}"
+FAST_ROWS="${FAST_ROWS:-0}"
 EFFORT_ALIAS="${EFFORT_ALIAS:-1}"
 LOG_REQUESTS="${LOG_REQUESTS:-0}"
 PORT="${PORT:-18300}"
@@ -223,6 +227,9 @@ case "$DRAFT_VOCAB" in
   *) DETENV+=(-e VLLM_MTP_DRAFT_VOCAB="$DRAFT_VOCAB") ;;
 esac
 DETENV+=(-e VLLM_PLE_MMAP_MADVISE="$MADVISE")
+# The module reads this with a silent fallback to 512 on anything unparsable, so refuse a bad value here.
+case "$FAST_ROWS" in ''|*[!0-9]*) echo "!! FAST_ROWS must be a non-negative integer (0 = thread pool for every gather, 512 = old inline path)"; exit 1 ;; esac
+DETENV+=(-e VLLM_PLE_MMAP_FAST_ROWS="$FAST_ROWS")
 LOGARGS=(); [ "$LOG_REQUESTS" = 1 ] && { DETENV+=(-e VLLM_LOGGING_LEVEL=DEBUG); LOGARGS=(--enable-log-requests --enable-log-outputs); }
 PC_ARG=--no-enable-prefix-caching
 [ "$PREFIX_CACHE" = 1 ] && PC_ARG=--enable-prefix-caching
@@ -290,6 +297,6 @@ case "$STATE" in
     ;;
 esac
 
-echo ">> $NAME starting on :$PORT (model 'qwen3.8-flash-next', mode=$MODE, ctx $CTX, yarn=$YARN, mtp=$MTP, seqs=$SEQS, prefix_cache=$PREFIX_CACHE, det_topk=$DET_TOPK, exact_topk=$EXACT_TOPK, pad_m4=$PAD_M4, draft_vocab=$DRAFT_VOCAB, madvise=$MADVISE, effort_alias=$EFFORT_ALIAS_STATE${COMPILE_CACHE:+, compile_cache=$COMPILE_CACHE})"
+echo ">> $NAME starting on :$PORT (model 'qwen3.8-flash-next', mode=$MODE, ctx $CTX, yarn=$YARN, mtp=$MTP, seqs=$SEQS, prefix_cache=$PREFIX_CACHE, det_topk=$DET_TOPK, exact_topk=$EXACT_TOPK, pad_m4=$PAD_M4, draft_vocab=$DRAFT_VOCAB, madvise=$MADVISE, fast_rows=$FAST_ROWS, effort_alias=$EFFORT_ALIAS_STATE${COMPILE_CACHE:+, compile_cache=$COMPILE_CACHE})"
 echo ">> first boot loads ~75 GiB of weights (~8-13 min). Follow:  docker logs -f $NAME"
 echo ">> ready when the log says 'Application startup complete'. Then: scripts/smoke-test.sh"
