@@ -17,7 +17,12 @@ curl -s -m 120 "$BASE/v1/completions" -H 'Content-Type: application/json' -d \
 echo ">> reasoning_effort high (Claude Code's default) on /v1/messages"
 code="$(curl -s -m 120 -o /dev/null -w '%{http_code}' "$BASE/v1/messages" -H 'Content-Type: application/json' -d \
   '{"model":"qwen3.8-flash-next","max_tokens":1,"messages":[{"role":"user","content":"hi"}],"output_config":{"effort":"high"}}' || true)"
-[ "$code" = 200 ] && echo "   OK" || echo "   HTTP $code (a 400 here means the template rejects it: serve with EFFORT_ALIAS=1)"
+case "$code" in
+  200) echo "   OK" ;;
+  400) echo "   HTTP 400: the chat template rejects effort=high (serve with EFFORT_ALIAS=1)" ;;
+  404|405) echo "   skipped: this server has no /v1/messages endpoint (HTTP $code)" ;;
+  *) echo "   HTTP ${code:-no response}" ;;
+esac
 
 echo ">> prefill (TTFT on a ~8k-token prompt), then determinism + prefix-cache hit on the same prompt"
 python3 - "$BASE" <<'PY'

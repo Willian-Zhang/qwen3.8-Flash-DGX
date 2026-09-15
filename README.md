@@ -92,9 +92,10 @@ Everything below is the long version: what was broken on GB10, what was fixed, a
   these checkpoints share — NVIDIA's, RadixArk's and the abliterated copies — accepts only `xhigh` (its
   default), `medium` and `low`, and raises on anything else. vLLM passes the request's effort straight
   through (on `/v1/messages`, `output_config.effort`), and Claude Code sends `high` by default, so every
-  such request failed with `Unexpected reasoning effort high`. `serve.sh` now serves the checkpoint's own
-  template behind a four-line preamble: `high` and `max` → `xhigh`, `minimal` → `low`. Every other value
-  renders byte-identically, and a template without that check is left alone.
+  such request failed with `Unexpected reasoning effort high`. `serve.sh` now serves a copy of the
+  checkpoint's own template with its one effort-resolving line rewritten: `high` and `max` → `xhigh`,
+  `minimal` → `low`. Every other value renders byte-identically, and a template without that check or
+  that line is left alone.
 
 ## Update 2026-09-13 — what changed
 
@@ -774,7 +775,7 @@ mmap patch should apply; we have not booted one ourselves.
 | `DRAFT_VOCAB` | `1` | MTP drafter scores only the 65,536 most frequent tokens (+20% decode, same tournament score, outputs unchanged). `0` = full vocabulary; a path = your own ids (`tools/build_draft_vocab.py`). |
 | `MADVISE` | `random` | `madvise` on the mmapped PLE table: `random` (no readahead: cold prefill −4–8%, cleaner page cache) or `normal`. |
 | `PAD_M4` | `0` | `1` = pad M%4 in the blockwise-fp8 GEMM (hybrid mode). No-op with `PREFIX_CACHE=1`; about −40% TTFT at 8k with `PREFIX_CACHE=0`. |
-| `EFFORT_ALIAS` | `1` | Accept every `reasoning_effort` a client can send. The checkpoints' template takes only `xhigh` (default), `medium` and `low` and 400s the rest — including Claude Code's default `high`. `1` serves the checkpoint's own template behind a preamble mapping `high`/`max` → `xhigh` and `minimal` → `low` (other values render byte-identically; the copy is written to `$HF_CACHE/qwen38-flash-dgx/chat-templates/`). Applied only when the template has that check. `0` = the template as shipped. |
+| `EFFORT_ALIAS` | `1` | Accept every `reasoning_effort` a client can send. The checkpoints' template takes only `xhigh` (default), `medium` and `low` and 400s the rest — including Claude Code's default `high`. `1` serves a copy of the checkpoint's own template whose effort-resolving line maps `high`/`max` → `xhigh` and `minimal` → `low` (other values render byte-identically; the copy is written to `$HF_CACHE/qwen38-flash-dgx/chat-templates/`). Applied only when the template has that check and that exact line. `0` = the template as shipped. |
 | `PORT` | `18300` | API port |
 | `CTX` | `262144` | Max context. Native is 262144; with `YARN=1` up to `500000` is validated. |
 | `YARN` | `0` | `1` = YaRN rope scaling (factor 4, Qwen's recipe) for `CTX` > 262144. |

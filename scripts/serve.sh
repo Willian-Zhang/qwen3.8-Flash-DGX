@@ -130,32 +130,39 @@ SNAP_IN="/hf/hub/models--${MODEL//\//--}/snapshots/$SNAP_NAME"
 # RadixArk / abliterated copy of it) accepts reasoning_effort xhigh (its default), medium and low, and
 # raises on anything else. vLLM hands the request's effort to the template unchanged — on /v1/messages
 # that is output_config.effort, which Claude Code sets to "high" — so those requests fail with
-# 400 "Unexpected reasoning effort high". When the template carries that check, serve a copy of it
-# behind a preamble that renames the rejected values first; every other effort renders byte-identically.
+# 400 "Unexpected reasoning effort high". When the template carries that check, serve a copy in which
+# the one line that resolves the effort maps the rejected values first (high, max -> xhigh;
+# minimal -> low); every other effort renders byte-identically. The line is rewritten rather than
+# reassigning reasoning_effort in a preamble, so the result never depends on how a Jinja
+# implementation scopes a {% set %} over a render argument.
 # The copy lives under $HF_CACHE (mounted at /hf) so the container's restart policy still finds it.
 TEMPLATE_ARGS=()
 EFFORT_ALIAS_STATE=off
 TEMPLATE_HOST="$REPO_DIR/snapshots/$SNAP_NAME/chat_template.jinja"
+EFFORT_RESOLVE_OLD="{%- set resolved_reasoning_effort = reasoning_effort|default('xhigh') %}"
+EFFORT_RESOLVE_NEW="{%- set resolved_reasoning_effort = {'high': 'xhigh', 'max': 'xhigh', 'minimal': 'low'}.get(reasoning_effort|default('xhigh'), reasoning_effort|default('xhigh')) %}"
 if [ "$EFFORT_ALIAS" = 1 ]; then
   EFFORT_ALIAS_STATE="n/a (template accepts other efforts)"
   if grep -qF "Supported types are xhigh (default), medium, and low." "$TEMPLATE_HOST" 2>/dev/null; then
-    ALIAS_REL="qwen38-flash-dgx/chat-templates/models--${MODEL//\//--}--${SNAP_NAME}.jinja"
-    ALIAS_HOST="$HF_CACHE/$ALIAS_REL"
-    if mkdir -p "$(dirname "$ALIAS_HOST")" 2>/dev/null && { cat <<'JINJA'
-{#- scripts/serve.sh (EFFORT_ALIAS=1): the template below accepts reasoning_effort xhigh, medium and low only.
-    Clients send the other OpenAI/Anthropic levels (Claude Code: "high"), so map them to the nearest one. -#}
-{%- if reasoning_effort in ('high', 'max') %}
-    {%- set reasoning_effort = 'xhigh' %}
-{%- elif reasoning_effort == 'minimal' %}
-    {%- set reasoning_effort = 'low' %}
-{%- endif %}
-JINJA
-      cat "$TEMPLATE_HOST"; } > "$ALIAS_HOST.tmp" 2>/dev/null && mv -f "$ALIAS_HOST.tmp" "$ALIAS_HOST"; then
-      TEMPLATE_ARGS=(--chat-template "/hf/$ALIAS_REL")
-      EFFORT_ALIAS_STATE=on
+    TPL=""
+    IFS= read -r -d '' TPL < "$TEMPLATE_HOST" || true   # keeps trailing newlines, unlike $(cat)
+    TPL_REST="${TPL#*"$EFFORT_RESOLVE_OLD"}"
+    if [ "$TPL_REST" = "$TPL" ] || [[ "$TPL_REST" == *"$EFFORT_RESOLVE_OLD"* ]]; then
+      echo "!! EFFORT_ALIAS: the template's effort line is not the expected one; serving it as is (reasoning_effort high will 400)"
+      EFFORT_ALIAS_STATE="off (unexpected template)"
     else
-      echo "!! EFFORT_ALIAS: could not write $ALIAS_HOST; serving the checkpoint's template as is (reasoning_effort high will 400)"
-      EFFORT_ALIAS_STATE="off (write failed)"
+      ALIAS_REL="qwen38-flash-dgx/chat-templates/models--${MODEL//\//--}--${SNAP_NAME}.jinja"
+      ALIAS_HOST="$HF_CACHE/$ALIAS_REL"
+      if mkdir -p "$(dirname "$ALIAS_HOST")" 2>/dev/null \
+         && printf '%s%s' "{#- scripts/serve.sh (EFFORT_ALIAS=1): effort line rewritten, high/max -> xhigh, minimal -> low. -#}" \
+              "${TPL/"$EFFORT_RESOLVE_OLD"/"$EFFORT_RESOLVE_NEW"}" > "$ALIAS_HOST.tmp" 2>/dev/null \
+         && mv -f "$ALIAS_HOST.tmp" "$ALIAS_HOST"; then
+        TEMPLATE_ARGS=(--chat-template "/hf/$ALIAS_REL")
+        EFFORT_ALIAS_STATE=on
+      else
+        echo "!! EFFORT_ALIAS: could not write $ALIAS_HOST; serving the checkpoint's template as is (reasoning_effort high will 400)"
+        EFFORT_ALIAS_STATE="off (write failed)"
+      fi
     fi
   fi
 fi
