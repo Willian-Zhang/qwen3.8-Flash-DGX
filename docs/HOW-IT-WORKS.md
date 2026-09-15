@@ -166,10 +166,13 @@ and makes decode numbers meaningless):
 3. **PLE gather hot path** in `src/vllm_ple_mmap.py`: dedup row ids on CPU (`np.unique`),
    gather only unique rows, stage them through a persistent pinned buffer with an async
    H2D copy, expand on the GPU via the inverse index; decode-sized gathers (≤
-   `VLLM_PLE_MMAP_FAST_ROWS`=512 unique rows) skip the thread pool. Also bf16/f16 tables,
-   `VLLM_PLE_MMAP_DIR`, and a periodic `PLE mmap stats` line — which shows where the
-   remaining decode cost is: ~6.5 ms of the ~9.5 ms per lookup is the disk gather
-   itself (the page cache holds only part of the 48 GiB table at `GPU_MEM=0.80`).
+   `VLLM_PLE_MMAP_FAST_ROWS` unique rows, module default 512) can skip the thread pool. Also
+   bf16/f16 tables, `VLLM_PLE_MMAP_DIR`, and a periodic `PLE mmap stats` line — which shows
+   where the remaining decode cost is: on that inline path ~6.5 ms of the ~9.5 ms per lookup
+   is the disk gather itself (the page cache holds only part of the 48 GiB table at
+   `GPU_MEM=0.80`). Those misses are why `serve.sh` now sets the threshold to 0 (`FAST_ROWS`):
+   on the pool their page faults overlap instead of queueing on one thread, measured at +8%
+   decode at 1 stream and +17% aggregate at 4 streams with the same rows gathered.
 
 ## Independent reproduction and the native offload path
 

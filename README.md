@@ -99,6 +99,15 @@ Everything below is the long version: what was broken on GB10, what was fixed, a
   cache, `~/.cache/qwen38-flash-dgx/` and the checkout: an HF cache first created by a manual `docker run`
   belongs to root, and the alias must not silently degrade to the old 400 there (`./flash doctor` now
   warns about such a cache).
+- **`FAST_ROWS=0`: every PLE gather goes to the thread pool** (new default). The mmap patch gathered
+  decode-sized batches (≤ 512 unique rows) inline on one thread, so every row the page cache had dropped
+  was its own serial page fault — and on a Spark the 48 GiB table never fits in cache. Measured within
+  one boot (drowzeys' NVIDIA-based checkpoint, v0.29, hybrid, MTP=3, `vm.swappiness=10`), the path
+  switched at runtime in ABBA-BAAB phases with fresh prompts each phase: **1 stream 35.1 → 37.9 tok/s
+  (+8%)**, gather 11.4 → 5.0 ms; **4 streams 68.0 → 79.4 tok/s aggregate (+17%)**, gather 36.4 → 11.5 ms,
+  every pool phase ahead of every inline phase. The rows gathered are the same either way, so outputs do
+  not change. `FAST_ROWS=512` restores the old path, which is ~0.8 ms faster per gather only when every
+  row is already cached.
 
 ## Update 2026-09-13 — what changed
 
@@ -777,6 +786,7 @@ mmap patch should apply; we have not booted one ourselves.
 | `EXACT_TOPK` | `0` | `1` = exact `torch.topk` fallback (deterministic; −8% prefill at 8k, −20–40% at 32k+). Wins over `DET_TOPK` when set. |
 | `DRAFT_VOCAB` | `1` | MTP drafter scores only the 65,536 most frequent tokens (+20% decode, same tournament score, outputs unchanged). `0` = full vocabulary; a path = your own ids (`tools/build_draft_vocab.py`). |
 | `MADVISE` | `random` | `madvise` on the mmapped PLE table: `random` (no readahead: cold prefill −4–8%, cleaner page cache) or `normal`. |
+| `FAST_ROWS` | `0` | PLE gathers of up to this many unique rows run inline on one thread; larger ones are split across the `WORKERS` pool. `0` sends every gather to the pool, so page faults on rows the page cache dropped overlap instead of queueing: +8% decode at 1 stream, +17% aggregate at 4 streams, same rows (see the 2026-09-14 update). `512` = the old inline fast path, faster only when every row is already cached. |
 | `PAD_M4` | `0` | `1` = pad M%4 in the blockwise-fp8 GEMM (hybrid mode). No-op with `PREFIX_CACHE=1`; about −40% TTFT at 8k with `PREFIX_CACHE=0`. |
 | `EFFORT_ALIAS` | `1` | Accept every `reasoning_effort` a client can send. The checkpoints' template takes only `xhigh` (default), `medium` and `low` and 400s the rest — including Claude Code's default `high`. `1` serves a copy of the checkpoint's own template whose effort-resolving line maps `high`/`max` → `xhigh` and `minimal` → `low` (other values render byte-identically; the copy goes to the first writable of `$HF_CACHE/qwen38-flash-dgx/chat-templates/`, `~/.cache/qwen38-flash-dgx/chat-templates/` and `.cache/chat-templates/` in the checkout, and is bind-mounted into the container, so a root-owned HF cache does not disable it). Applied only when the template has that check and that exact line. `0` = the template as shipped. |
 | `PORT` | `18300` | API port |
@@ -787,7 +797,7 @@ mmap patch should apply; we have not booted one ourselves.
 | `MTP` | `2` | Speculative tokens from the model's MTP head (`0` = off). `3` is +7% decode but cost a point at the tournament (44 vs 45/51), so it stays an option. |
 | `KV_DTYPE` | `auto` | `auto` = bf16 (recommended). `fp8_e4m3` = ~1.9× KV pool, 1M context on one box, at −10% decode / −30% prefill and a measurable quality cost — see [fp8 KV cache](docs/HOW-IT-WORKS.md#fp8-kv-cache-on-the-qsa-path-opt-in) before using it. |
 | `PREWARM` | `0` | `1` streams the 48 GiB table once at boot to warm the page cache — steadier first-request latency, ~10 s extra startup. |
-| `WORKERS` | `32` | Threads used for the mmap gather (only used above `VLLM_PLE_MMAP_FAST_ROWS`=512 unique rows; decode-sized gathers run inline). |
+| `WORKERS` | `32` | Threads used for the mmap gather: every gather at the default `FAST_ROWS=0`; with `FAST_ROWS=512`, only gathers above 512 unique rows (decode-sized gathers then run inline). |
 | `COMPILE_CACHE` | | Keep vLLM's compiled graphs across boots — this script recreates the container every run, so by default they are rebuilt each time. `<name>` = two docker volumes, `/abs/path` = two bind mounts. **−80 s ± 2 s of init engine** per boot after the first, 169 MB of disk; only worth setting if something recreates the container for you (a model-swapping proxy, CI, tournament runs). See [above](#optional-persistent-compile-cache-compile_cache). |
 | `LOG_REQUESTS` | `0` | `1` logs every prompt and output (`VLLM_LOGGING_LEVEL=DEBUG --enable-log-requests --enable-log-outputs`) so `tools/vllm_watch.py` can show sessions live. Debugging only: it puts user content in the Docker log, unbounded. |
 | `PROM_MULTIPROC` | `0` | `1` runs prometheus_client in multiprocess mode so engine-side metrics (`vllm:ple_mmap_*`) reach `/metrics`. Opt-in, because it stops vLLM exporting its `*_created` samples; see *Watching the mmapped table* below. |
@@ -932,8 +942,10 @@ From [@Saren-Arterius](https://github.com/Saren-Arterius)'s fork, merged here wi
   ([fla#953](https://github.com/fla-org/flash-linear-attention/issues/953)). Correctness, not speed.
 - **PLE gather hot path** — CPU dedup of row ids, a persistent pinned staging buffer with an
   async H2D copy, GPU-side expansion through the inverse index, and an inline fast path
-  for decode-sized batches (`VLLM_PLE_MMAP_FAST_ROWS`, default 512; larger gathers are split
-  into `VLLM_PLE_MMAP_CHUNK`=2048-row tasks across `WORKERS` threads). Also: bf16/f16 tables,
+  for decode-sized batches (`VLLM_PLE_MMAP_FAST_ROWS`, module default 512; larger gathers are split
+  into `VLLM_PLE_MMAP_CHUNK`=2048-row tasks across `WORKERS` threads). `serve.sh` now sets it to 0
+  (`FAST_ROWS`): on a Spark enough rows miss the page cache that overlapping their faults on the pool
+  wins, by 8% at 1 stream and 17% at 4. Also: bf16/f16 tables,
   `VLLM_PLE_MMAP_DIR` to serve the table from another directory, and a periodic
   `PLE mmap stats` log line (`VLLM_PLE_MMAP_STATS_SEC`, default 30).
 - **Mamba state-copy guard** — with [vllm#50729](https://github.com/vllm-project/vllm/pull/50729)
