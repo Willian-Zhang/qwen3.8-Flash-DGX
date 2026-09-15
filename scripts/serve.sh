@@ -25,6 +25,8 @@
 #   DRAFT_VOCAB=1     1 = the MTP drafter scores only the 65,536 most frequent tokens (+20% decode, same
 #                     tournament score); 0 = full vocabulary; a path = your own ids.npy (tools/build_draft_vocab.py)
 #   MADVISE=random    madvise on the mmapped PLE table: random (default; no readahead, cleaner page cache) or normal
+#   EFFORT_ALIAS=1    1 = accept reasoning_effort high/max (-> xhigh) and minimal (-> low): the checkpoint's
+#                     template only takes xhigh/medium/low and 400s the rest, including Claude Code's "high"
 #   LOG_REQUESTS=0    1 = log every prompt and output (VLLM_LOGGING_LEVEL=DEBUG, --enable-log-requests
 #                     --enable-log-outputs) for tools/vllm_watch.py. Debugging only: privacy + unbounded logs
 #   PORT=18300        host port for the API
@@ -66,6 +68,7 @@ EXACT_TOPK="${EXACT_TOPK:-0}"
 PAD_M4="${PAD_M4:-0}"
 DRAFT_VOCAB="${DRAFT_VOCAB:-1}"
 MADVISE="${MADVISE:-random}"
+EFFORT_ALIAS="${EFFORT_ALIAS:-1}"
 LOG_REQUESTS="${LOG_REQUESTS:-0}"
 PORT="${PORT:-18300}"
 CTX="${CTX:-262144}"
@@ -122,6 +125,47 @@ case "$MODE" in
   *) echo "!! MODE must be nvfp4, hybrid or hybrid-mtp"; exit 1 ;;
 esac
 SNAP_IN="/hf/hub/models--${MODEL//\//--}/snapshots/$SNAP_NAME"
+
+# Reasoning effort aliases (EFFORT_ALIAS=1). The Qwen3.8-Flash-Next chat template (NVIDIA's, and every
+# RadixArk / abliterated copy of it) accepts reasoning_effort xhigh (its default), medium and low, and
+# raises on anything else. vLLM hands the request's effort to the template unchanged — on /v1/messages
+# that is output_config.effort, which Claude Code sets to "high" — so those requests fail with
+# 400 "Unexpected reasoning effort high". When the template carries that check, serve a copy in which
+# the one line that resolves the effort maps the rejected values first (high, max -> xhigh;
+# minimal -> low); every other effort renders byte-identically. The line is rewritten rather than
+# reassigning reasoning_effort in a preamble, so the result never depends on how a Jinja
+# implementation scopes a {% set %} over a render argument.
+# The copy lives under $HF_CACHE (mounted at /hf) so the container's restart policy still finds it.
+TEMPLATE_ARGS=()
+EFFORT_ALIAS_STATE=off
+TEMPLATE_HOST="$REPO_DIR/snapshots/$SNAP_NAME/chat_template.jinja"
+EFFORT_RESOLVE_OLD="{%- set resolved_reasoning_effort = reasoning_effort|default('xhigh') %}"
+EFFORT_RESOLVE_NEW="{%- set resolved_reasoning_effort = {'high': 'xhigh', 'max': 'xhigh', 'minimal': 'low'}.get(reasoning_effort|default('xhigh'), reasoning_effort|default('xhigh')) %}"
+if [ "$EFFORT_ALIAS" = 1 ]; then
+  EFFORT_ALIAS_STATE="n/a (template accepts other efforts)"
+  if grep -qF "Supported types are xhigh (default), medium, and low." "$TEMPLATE_HOST" 2>/dev/null; then
+    TPL=""
+    IFS= read -r -d '' TPL < "$TEMPLATE_HOST" || true   # keeps trailing newlines, unlike $(cat)
+    TPL_REST="${TPL#*"$EFFORT_RESOLVE_OLD"}"
+    if [ "$TPL_REST" = "$TPL" ] || [[ "$TPL_REST" == *"$EFFORT_RESOLVE_OLD"* ]]; then
+      echo "!! EFFORT_ALIAS: the template's effort line is not the expected one; serving it as is (reasoning_effort high will 400)"
+      EFFORT_ALIAS_STATE="off (unexpected template)"
+    else
+      ALIAS_REL="qwen38-flash-dgx/chat-templates/models--${MODEL//\//--}--${SNAP_NAME}.jinja"
+      ALIAS_HOST="$HF_CACHE/$ALIAS_REL"
+      if mkdir -p "$(dirname "$ALIAS_HOST")" 2>/dev/null \
+         && printf '%s%s' "{#- scripts/serve.sh (EFFORT_ALIAS=1): effort line rewritten, high/max -> xhigh, minimal -> low. -#}" \
+              "${TPL/"$EFFORT_RESOLVE_OLD"/"$EFFORT_RESOLVE_NEW"}" > "$ALIAS_HOST.tmp" 2>/dev/null \
+         && mv -f "$ALIAS_HOST.tmp" "$ALIAS_HOST"; then
+        TEMPLATE_ARGS=(--chat-template "/hf/$ALIAS_REL")
+        EFFORT_ALIAS_STATE=on
+      else
+        echo "!! EFFORT_ALIAS: could not write $ALIAS_HOST; serving the checkpoint's template as is (reasoning_effort high will 400)"
+        EFFORT_ALIAS_STATE="off (write failed)"
+      fi
+    fi
+  fi
+fi
 
 # The PLE gather is a CPU op + a pageable host->device copy: it MUST run outside
 # CUDA graphs. We declare it a splitting op and use PIECEWISE capture (never FULL*).
@@ -220,7 +264,7 @@ docker run -d --name "$NAME" --restart unless-stopped \
     --kv-cache-dtype "$KV_DTYPE" ${KV_CACHE_MEM:+--kv-cache-memory-bytes "$KV_CACHE_MEM"} \
     "${OVR_ARGS[@]}" "${LOGARGS[@]}" $EXTRA \
     --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3 \
-    "${SPEC[@]}"
+    "${TEMPLATE_ARGS[@]}" "${SPEC[@]}"
 
 # Fail loudly instead of printing a success line over a dead container: give vLLM a few
 # seconds to parse its arguments, then check the state (the status word only — the string
@@ -237,6 +281,6 @@ case "$STATE" in
     ;;
 esac
 
-echo ">> $NAME starting on :$PORT (model 'qwen3.8-flash-next', mode=$MODE, ctx $CTX, yarn=$YARN, mtp=$MTP, seqs=$SEQS, prefix_cache=$PREFIX_CACHE, det_topk=$DET_TOPK, exact_topk=$EXACT_TOPK, pad_m4=$PAD_M4, draft_vocab=$DRAFT_VOCAB, madvise=$MADVISE${COMPILE_CACHE:+, compile_cache=$COMPILE_CACHE})"
+echo ">> $NAME starting on :$PORT (model 'qwen3.8-flash-next', mode=$MODE, ctx $CTX, yarn=$YARN, mtp=$MTP, seqs=$SEQS, prefix_cache=$PREFIX_CACHE, det_topk=$DET_TOPK, exact_topk=$EXACT_TOPK, pad_m4=$PAD_M4, draft_vocab=$DRAFT_VOCAB, madvise=$MADVISE, effort_alias=$EFFORT_ALIAS_STATE${COMPILE_CACHE:+, compile_cache=$COMPILE_CACHE})"
 echo ">> first boot loads ~75 GiB of weights (~8-13 min). Follow:  docker logs -f $NAME"
 echo ">> ready when the log says 'Application startup complete'. Then: scripts/smoke-test.sh"
