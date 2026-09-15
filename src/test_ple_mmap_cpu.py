@@ -4,7 +4,9 @@ Run inside the vLLM image (needs numpy + torch, no GPU):
   docker run --rm -v $PWD:/t -w /t --entrypoint python3 vllm/vllm-openai:qwen38-flash-next test_ple_mmap_cpu.py
 """
 import json
+import logging
 import os
+import re
 import struct
 import sys
 import tempfile
@@ -91,6 +93,28 @@ out = emb(ids_t)
 assert out.shape == (300, 16, COLS) and out.dtype == torch.float8_e4m3fn
 assert np.array_equal(out.view(torch.uint8).numpy().reshape(-1, COLS), table[ids_t.numpy().reshape(-1)])
 print("placeholder forward: OK (fp8 view, shape", tuple(out.shape), ")")
+
+# Phase stats. On CPU there is no stream to wait on, so wait_ms stays 0. The log line keeps its original
+# prefix (benchmark scripts parse "gather N ms total (X ms/op)") and appends the split.
+for k in ("wait_ms", "dedup_ms", "stage_ms"):
+    assert k in m._STATS, k
+assert m._STATS["wait_ms"] == 0.0 and m._STATS["dedup_ms"] > 0 and m._STATS["stage_ms"] > 0, m._STATS
+m._STATS.update(calls=4, op_ms=m._STATS["dedup_ms"] + m._STATS["gather_ms"] + m._STATS["stage_ms"])
+records = []
+handler = logging.Handler()
+handler.emit = lambda r: records.append(r.getMessage())
+m.logger.addHandler(handler)
+m.logger.setLevel(logging.INFO)
+m._STATS_LAST[0] = 0.0
+m._stats_log()
+m.logger.removeHandler(handler)
+line = next((r for r in records if r.startswith("PLE mmap stats")), None)
+assert line and re.search(r"gather \d+ ms total \([\d.]+ ms/op\), \d+ rows, [\d.]+ MiB read, ", line), line
+assert re.search(r"gpu-wait 0\.00 ms/op, host [\d.]+ ms/op \(dedup [\d.]+, gather [\d.]+, stage [\d.]+\)$", line), line
+assert m._STATS["calls"] == 0 and m._STATS["wait_ms"] == 0.0 and m._STATS["dedup_ms"] == 0.0, m._STATS
+if m._PROM:
+    assert {"gpu_wait_s", "dedup_s", "stage_s"} <= set(m._PROM), sorted(m._PROM)
+print("phase stats: OK (" + line.split("MiB read, ", 1)[1] + ")")
 
 # zeros path (no table)
 emb2 = m._MmapNgramEmbedding(ROWS, COLS)

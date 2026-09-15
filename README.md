@@ -813,12 +813,22 @@ unified memory. The module exports five counters so this is visible on a dashboa
 rather than only in a windowed log line that a container restart destroys:
 
 ```
-vllm:ple_mmap_lookup_ops_total       lookups (hash + gather + H2D)
-vllm:ple_mmap_op_seconds_total       cumulative seconds in the lookup op
-vllm:ple_mmap_gather_seconds_total   cumulative seconds in the row gather (disk reads)
-vllm:ple_mmap_rows_total             rows gathered
-vllm:ple_mmap_bytes_total            bytes read from the table
+vllm:ple_mmap_lookup_ops_total         lookups (hash + gather + H2D)
+vllm:ple_mmap_op_seconds_total         cumulative seconds in the lookup op, GPU wait included
+vllm:ple_mmap_gpu_wait_seconds_total   of which: waiting for GPU work queued ahead of the lookup (not PLE cost)
+vllm:ple_mmap_dedup_seconds_total      of which: copying the row ids to the host and deduplicating them
+vllm:ple_mmap_gather_seconds_total     of which: the row gather (disk reads)
+vllm:ple_mmap_stage_seconds_total      of which: staging the rows for the GPU (pinned copy, H2D launch)
+vllm:ple_mmap_rows_total               rows gathered
+vllm:ple_mmap_bytes_total              bytes read from the table
 ```
+
+The lookup starts with a blocking copy of the row ids to the host, and that copy waits for every GPU
+kernel queued ahead of it: the n-gram hashing and the layers before the PLE layer. `op_seconds` therefore
+mixes their compute with the lookup's own cost (one prefill window read 165 ms per lookup, of which 8 ms
+was the gather). `gpu_wait_seconds` is that wait on its own, so `op − gpu_wait` is what the lookup itself
+costs the step. The periodic `PLE mmap stats` log line shows the same split at its end:
+`gpu-wait X ms/op, host Y ms/op (dedup, gather, stage)`.
 
 They are registered in the EngineCore process, so they only reach `/metrics` when
 prometheus_client runs in multiprocess mode. vLLM turns that on only for
@@ -832,18 +842,23 @@ identical label sets and no per-process `pid` label. The only loss is the 35
 exporting the counters is opt-in, so nothing changes for existing dashboards unless you
 ask for it.
 
-The three views worth graphing:
+The views worth graphing:
 
 ```promql
-rate(vllm:ple_mmap_op_seconds_total[5m]) / rate(vllm:ple_mmap_lookup_ops_total[5m])
-rate(vllm:ple_mmap_gather_seconds_total[5m]) / rate(vllm:ple_mmap_op_seconds_total[5m])
+# host seconds per lookup: what the PLE lookup itself costs each step
+(rate(vllm:ple_mmap_op_seconds_total[5m]) - rate(vllm:ple_mmap_gpu_wait_seconds_total[5m]))
+  / rate(vllm:ple_mmap_lookup_ops_total[5m])
+# page-cache health: the share of the lookup's own time spent on disk
+rate(vllm:ple_mmap_gather_seconds_total[5m])
+  / (rate(vllm:ple_mmap_op_seconds_total[5m]) - rate(vllm:ple_mmap_gpu_wait_seconds_total[5m]))
+# NVMe read bandwidth from the table
 rate(vllm:ple_mmap_bytes_total[5m])
 ```
 
-The middle one is the page-cache health signal — the share of each lookup spent waiting
-on disk. It climbs as the cache is squeezed and falls as the hot region settles in. Pair
-it with `Cached` from a node exporter, since nothing in vLLM's own metrics exposes the
-quantity that actually governs it. `VLLM_PLE_MMAP_PROMETHEUS=0` turns the counters off.
+The disk share is the page-cache health signal. It climbs as the cache is squeezed and falls
+as the hot region settles in. Divide by `op_seconds` alone and it also moves with GPU load,
+which says nothing about the cache. Pair it with `Cached` from a node exporter, since nothing
+in vLLM's own metrics exposes the quantity that actually governs it. `VLLM_PLE_MMAP_PROMETHEUS=0` turns the counters off.
 
 ## Throughput and concurrency
 
