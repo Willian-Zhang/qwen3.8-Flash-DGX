@@ -16,6 +16,7 @@
 #  10. Reduced draft vocabulary for the MTP drafter    (VLLM_MTP_DRAFT_VOCAB=<ids.npy>) — +20% decode, same tournament score
 #  11. ModelOpt mixed-precision block-FP8 experts     (VLLM_MODELOPT_BLOCK_MOE=0 disables)
 #  12. Lossless malformed Qwen tool preambles        (always on for the qwen3 parser)
+#  13. Quoted tool markers stay text, not calls     (always on for the qwen3 parser)
 #
 #   docker build -t qwen38-flash-dgx .
 #
@@ -162,3 +163,10 @@ RUN printf '\n\n# --- qwen38-flash-dgx: FP8_BLOCK_SCALES support for ModelOpt MI
 COPY src/patches/qwen-tool-preamble.patch /tmp/qwen-tool-preamble.patch
 RUN cd ${SP} && patch --batch --forward --fuzz=0 -p1 < /tmp/qwen-tool-preamble.patch \
  && rm /tmp/qwen-tool-preamble.patch
+
+# --- 13. Quoted Qwen tool markers the model is documenting, not calling ---
+# A marker inside a fenced code block, or a wrapper-less <function= header mid-line,
+# stays text and opens no tool call. Shared by both bases; needs 12 applied first.
+COPY src/patches/qwen-tool-marker-guard.patch /tmp/qwen-tool-marker-guard.patch
+RUN cd ${SP} && patch --batch --forward --fuzz=0 -p1 < /tmp/qwen-tool-marker-guard.patch \
+ && rm /tmp/qwen-tool-marker-guard.patch
