@@ -89,16 +89,26 @@ the fence opener, which is why this reads as "output dies on a backtick".
 Patch 13 adds a second guard, also `qwen3`-only:
 
 - **Inside a fenced code block**, `<tool_call>` and `<function=` stay text and open
-  no call. Fence depth is tracked per channel, so a fence left open in reasoning
-  does not carry into the answer; three or more backticks or tildes at the start of
-  a line toggle it.
+  no call. Fences follow CommonMark: a run of three or more backticks or tildes at
+  the start of a line (at most three spaces of indent) opens one, and only a run of
+  the same character at least as long, with nothing but whitespace after it, closes
+  it — so a ```` ```xml ```` block nested inside a ````` ````md ````` block does not
+  close the outer one. Fence state is per channel and is re-synced on use, so a
+  fence left open in reasoning never carries into the answer, even when the call
+  follows `</think>` with nothing in between.
 - **A wrapper-less `<function=` header** opens a call only at the start of a line.
   Mid-line it is prose naming the marker. This is the `(CONTENT, FUNC_PREFIX)`
   fallback, which patch 12 does not guard at all.
 
-Not covered: illustrative `<tool_call>` XML written in reasoning *outside* a fence
-still opens a call. Suppressing that would mean dropping the reasoning → tool-call
-transition, which this model does use.
+Not covered, both deliberate:
+
+- Illustrative `<tool_call>` XML written in reasoning *outside* a fence still opens
+  a call. Suppressing that would mean dropping the reasoning → tool-call transition,
+  which this model does use.
+- A fence the model opens and never closes keeps the guard active for the rest of
+  the turn, so a real tool call after it is returned as text instead of being
+  parsed. That is the cost of deciding from the text alone;
+  `test_unclosed_fence_suppresses_later_calls` asserts it so a change is deliberate.
 
 The regression patches extend vLLM's Qwen parser tests. To run them from a matching
 vLLM source checkout with its test dependencies installed (using absolute paths to
@@ -112,8 +122,8 @@ patch --batch --forward --fuzz=0 -p1 < /path/to/qwen3.8-Flash-DGX/src/patches/qw
 .venv/bin/python -m pytest tests/parser/engine -q
 ```
 
-Patch 13's own module, `tests/parser/engine/test_qwen3_literal_markers.py`, is 21
-cases over three chunk sizes: 12 fail and 9 pass on patch 12 alone, all 21 pass with
+Patch 13's own module, `tests/parser/engine/test_qwen3_literal_markers.py`, is 30
+cases over three chunk sizes: 21 fail and 9 pass on patch 12 alone, all 30 pass with
 patch 13. The 9 that pass either way are the no-regression guards — a real call
 still parses, a real call after a closed fence still parses, and patch 12's own
 inline-quoted-marker case is unchanged.

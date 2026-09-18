@@ -2,7 +2,7 @@ diff --git a/tests/parser/engine/test_qwen3_literal_markers.py b/tests/parser/en
 new file mode 100644
 --- /dev/null
 +++ b/tests/parser/engine/test_qwen3_literal_markers.py
-@@ -0,0 +1,119 @@
+@@ -0,0 +1,173 @@
 +# SPDX-License-Identifier: Apache-2.0
 +# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 +"""Qwen3 tool markers the model is quoting rather than calling with.
@@ -106,10 +106,64 @@ new file mode 100644
 +
 +@pytest.mark.parametrize("chunk_size", CHUNK_SIZES)
 +def test_nested_fences_balance(chunk_size):
-+    text = "Short thought.</think>\n\n````md\n```\n<tool_call>\n```\n````\n\nAfter.\n"
++    """A shorter inner fence does not close the block around it.
++
++    The inner block holds a well-formed call, so this fails unless the
++    closing run is compared against the opening one.
++    """
++    text = (
++        "Short thought.</think>\n\n````md\n```xml\n<tool_call>\n<function=Bash>\n"
++        "<parameter=command>\nls\n</parameter>\n</function>\n</tool_call>\n```\n"
++        "````\n\nAfter.\n"
++    )
 +    events = _parse(text, chunk_size)
 +    assert _tool_count(events) == 0
 +    assert _joined(events, EventType.TEXT_CHUNK) == text.split("</think>")[1]
++
++
++@pytest.mark.parametrize("chunk_size", CHUNK_SIZES)
++def test_four_space_indent_is_not_a_fence(chunk_size):
++    """Four leading spaces is indented code in Markdown, not a fence."""
++    text = (
++        "Short thought.</think>\n\n    ```\n<tool_call>\n<function=Bash>\n"
++        "<parameter=command>\nls\n</parameter>\n</function>\n</tool_call>"
++    )
++    events = _parse(text, chunk_size)
++    assert _tool_count(events) == 1
++    assert _tool_names(events) == "Bash"
++
++
++@pytest.mark.parametrize("chunk_size", CHUNK_SIZES)
++def test_tool_call_immediately_after_reasoning_end(chunk_size):
++    """The channel can change with no text between, so the fence state
++    left behind by reasoning must not leak into the answer."""
++    text = (
++        "Format:\n```\n<tool_call>\n<function=Bash>\n</function>\n</tool_call>\n"
++        "ok</think><tool_call>\n<function=Bash>\n<parameter=command>\nls\n"
++        "</parameter>\n</function>\n</tool_call>"
++    )
++    events = _parse(text, chunk_size)
++    assert _tool_count(events) == 1
++    assert _tool_names(events) == "Bash"
++    assert _joined(events, EventType.TEXT_CHUNK) == ""
++    assert "<function=Bash>" in _joined(events, EventType.REASONING_CHUNK)
++
++
++@pytest.mark.parametrize("chunk_size", CHUNK_SIZES)
++def test_unclosed_fence_suppresses_later_calls(chunk_size):
++    """Known trade-off, asserted so a change to it is deliberate.
++
++    A fence the model never closes keeps the guard active for the rest of
++    the turn, so a real call after it is returned as text instead.
++    """
++    text = (
++        "Short thought.</think>\n\nHere:\n```python\nprint(1)\nNow run it.\n"
++        "<tool_call>\n<function=Bash>\n<parameter=command>\nls\n</parameter>\n"
++        "</function>\n</tool_call>"
++    )
++    events = _parse(text, chunk_size)
++    assert _tool_count(events) == 0
++    assert "<tool_call>" in _joined(events, EventType.TEXT_CHUNK)
 +
 +
 +@pytest.mark.parametrize("chunk_size", CHUNK_SIZES)

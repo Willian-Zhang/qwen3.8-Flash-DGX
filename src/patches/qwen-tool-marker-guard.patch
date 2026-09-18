@@ -31,19 +31,15 @@ diff --git a/vllm/parser/engine/streaming_parser_engine.py b/vllm/parser/engine/
  
          self.skip_tool_parsing = False
          self.reset(initial_state=initial_state)
-@@ -210,6 +218,11 @@
+@@ -210,6 +218,7 @@
          self._pending_tool_start: tuple[str, str, int] | None = None
          self._tool_preamble_buffer = ""
          self._tool_preamble_token_count = 0
-+        self._marker_guard_state: ParserState | None = None
-+        self._fence_depth = 0
-+        self._fence_run = 0
-+        self._fence_char = ""
-+        self._at_line_start = True
++        self._reset_marker_guard()
          self._reset_args_state()
  
      def feed(
-@@ -398,6 +411,15 @@
+@@ -398,6 +407,15 @@
              return self._emit_for_state(value, token_count)
  
          if (
@@ -59,10 +55,52 @@ diff --git a/vllm/parser/engine/streaming_parser_engine.py b/vllm/parser/engine/
              self.config.validate_tool_preamble
              and not confirmed_tool_start
              and self.state in (ParserState.CONTENT, ParserState.REASONING)
-@@ -463,7 +485,60 @@
+@@ -463,7 +481,107 @@
  
          return self._apply_transition(transition, value, token_count)
  
++    def _reset_marker_guard(self) -> None:
++        self._marker_guard_state: ParserState | None = self.state
++        self._fence_open_run = 0
++        self._fence_open_char = ""
++        self._close_pending = False
++        self._begin_line()
++
++    def _begin_line(self) -> None:
++        self._line_state = "indent"
++        self._line_indent = 0
++        self._fence_run = 0
++        self._fence_run_char = ""
++
++    def _resolve_fence_run(self) -> None:
++        """Act on the fence run that just ended on this line.
++
++        CommonMark: a run of three or more opens, and only a run of the same
++        character at least as long closes. A shorter inner fence therefore
++        does not close the block around it.
++        """
++        run, char = self._fence_run, self._fence_run_char
++        self._fence_run = 0
++        self._line_state = "body"
++        if run < 3:
++            return
++        if not self._fence_open_run:
++            self._fence_open_run = run
++            self._fence_open_char = char
++        elif char == self._fence_open_char and run >= self._fence_open_run:
++            # Only a closer if nothing but whitespace follows it.
++            self._close_pending = True
++
++    def _sync_marker_guard(self) -> None:
++        """Reasoning and content are separate documents.
++
++        A fence left open in one must not carry into the other, and the
++        channel can change with no text in between (``</think><tool_call>``),
++        so this is checked on use as well as on the next chunk of text.
++        """
++        if self.state is not self._marker_guard_state:
++            self._reset_marker_guard()
++
 +    def _marker_is_literal(self, terminal: str) -> bool:
 +        """Report a tool marker the model cannot be using to open a call.
 +
@@ -71,41 +109,46 @@ diff --git a/vllm/parser/engine/streaming_parser_engine.py b/vllm/parser/engine/
 +        function header is a call only when it starts a line; mid-line it
 +        is prose naming the marker.
 +        """
-+        if self._fence_depth:
++        self._sync_marker_guard()
++        if self._line_state == "run":
++            self._resolve_fence_run()
++        if self._fence_open_run:
 +            return True
-+        return terminal in self._bare_tool_headers and not self._at_line_start
++        at_line_start = self._line_state != "body"
++        return terminal in self._bare_tool_headers and not at_line_start
 +
 +    def _track_literal_text(self, text: str) -> None:
-+        """Follow fence depth and line-start position through plain text.
-+
-+        Reasoning and content are separate documents, so a fence left open
-+        in one does not carry into the other.
-+        """
-+        if self.state is not self._marker_guard_state:
-+            self._marker_guard_state = self.state
-+            self._fence_depth = 0
-+            self._fence_run = 0
-+            self._fence_char = ""
-+            self._at_line_start = True
++        """Follow fence state and line-start position through plain text."""
++        self._sync_marker_guard()
 +        for ch in text:
 +            if ch == "\n":
-+                self._at_line_start = True
-+                self._fence_run = 0
-+                self._fence_char = ""
++                if self._line_state == "run":
++                    self._resolve_fence_run()
++                if self._close_pending:
++                    self._fence_open_run = 0
++                    self._fence_open_char = ""
++                    self._close_pending = False
++                self._begin_line()
 +                continue
-+            if not self._at_line_start:
++            if self._line_state == "indent":
++                # Four or more leading spaces is indented code, not a fence.
++                if ch in " \t" and self._line_indent < 3:
++                    self._line_indent += 1
++                    continue
++                if ch in "`~":
++                    self._line_state = "run"
++                    self._fence_run_char = ch
++                    self._fence_run = 1
++                    continue
++                self._line_state = "body"
 +                continue
-+            if ch in "`~" and self._fence_char in ("", ch):
-+                self._fence_char = ch
-+                self._fence_run += 1
-+                if self._fence_run == 3:
-+                    self._fence_depth = 0 if self._fence_depth else 1
-+                continue
-+            if ch in " \t" and self._fence_run == 0:
-+                continue
-+            self._at_line_start = False
-+            self._fence_run = 0
-+            self._fence_char = ""
++            if self._line_state == "run":
++                if ch == self._fence_run_char:
++                    self._fence_run += 1
++                    continue
++                self._resolve_fence_run()
++            if self._close_pending and ch not in " \t":
++                self._close_pending = False
 +
      def _emit_for_state(self, text: str, token_count: int = 0) -> list[SemanticEvent]:
 +        # A deferred wrapper replays its buffer through here once it is
