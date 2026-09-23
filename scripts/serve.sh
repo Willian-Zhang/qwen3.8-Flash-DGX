@@ -55,6 +55,10 @@
 #                     -v to bind-mount an instrumented file over the image's copy)
 #   DETACH=1          0 = run the container in the foreground with --restart no, so an
 #                     external supervisor owns the lifecycle (see systemd/qwen38-flash.service)
+#   HF_HUB_DIRS=      colon-separated hub dirs (the dir holding models--*) to serve the weights from,
+#                     first usable wins, e.g. an NFS cache then the local one. Unset = $HF_CACHE/hub.
+#                     Probed with a timeout (HUB_PROBE_TIMEOUT=10 s) so a dead mount falls through
+#                     instead of hanging; only boot-time fallback, a hard mount still blocks at runtime
 #   COMPILE_CACHE=    where to keep vLLM's compiled graphs and FlashInfer's JIT modules across
 #                     boots. Unset (default) = inside the container, which this script recreates
 #                     every time, so they are rebuilt on every boot (80 s of init engine, see
@@ -92,8 +96,34 @@ EXTRA="${EXTRA:-}"
 COMPILE_CACHE="${COMPILE_CACHE:-}"
 DETACH="${DETACH:-1}"
 
-# Resolve the local snapshot directory and map it to the in-container mount.
-REPO_DIR="$HF_CACHE/hub/models--${MODEL//\//--}"
+# Pick the hub dir. A candidate is usable when it answers within the timeout (SIGKILL: a hard NFS
+# mount whose server is gone blocks killably, not interruptibly) and holds what this MODE serves:
+# refs/main -> a snapshot with config.json, plus the prepared hybrid layout for hybrid modes.
+# Anything else (another hub dir, $HF_CACHE/hub) is bind-mounted read-only over /hf/hub, while
+# $HF_CACHE stays the writable /hf for everything else.
+HUB_DIR="$HF_CACHE/hub"
+HUB_MNT=()
+if [ -n "${HF_HUB_DIRS:-}" ]; then
+  case "$MODE" in hybrid) PROBE_SUFFIX=-fp8hybrid ;; hybrid-mtp) PROBE_SUFFIX=-fp8hybrid-mtpnvfp4 ;; *) PROBE_SUFFIX= ;; esac
+  HUB_DIR=""
+  IFS=: read -r -a HUB_CANDIDATES <<< "$HF_HUB_DIRS"
+  for d in "${HUB_CANDIDATES[@]}"; do
+    [ -n "$d" ] || continue
+    if timeout -s KILL "${HUB_PROBE_TIMEOUT:-10}" bash -c '
+         r="$1/models--$2"; rev="$(cat "$r/refs/main")" && s="$r/snapshots/$rev" \
+           && head -c1 "$s/config.json" >/dev/null \
+           && { [ -z "$3" ] || [ -f "$s$3/.prepared" ]; }' _ "$d" "${MODEL//\//--}" "$PROBE_SUFFIX" 2>/dev/null; then
+      HUB_DIR="${d%/}"; break
+    fi
+    echo ">> hub dir skipped (no usable $MODEL for MODE=$MODE, or no answer in ${HUB_PROBE_TIMEOUT:-10} s): $d"
+  done
+  if [ -z "$HUB_DIR" ]; then echo "!! none of HF_HUB_DIRS holds a usable $MODEL (MODE=$MODE): $HF_HUB_DIRS"; exit 1; fi
+  [ "$HUB_DIR" -ef "$HF_CACHE/hub" ] || HUB_MNT=(-v "$HUB_DIR:/hf/hub:ro")
+  echo ">> weights from $HUB_DIR"
+fi
+
+# Resolve the snapshot directory and map it to the in-container mount.
+REPO_DIR="$HUB_DIR/models--${MODEL//\//--}"
 # Pick the revision the cache actually points at (refs/main), not whichever snapshot
 # sorts first: a cache that holds two revisions would otherwise serve the wrong one.
 SNAP_HOST=""
@@ -284,7 +314,7 @@ trap 'rc=$?; [ $rc -ne 0 ] && docker rm -f "$NAME" >/dev/null 2>&1; exit $rc' EX
 # shellcheck disable=SC2086
 docker run "${RUN_FLAGS[@]}" --name "$NAME" \
   --gpus all --ipc=host --shm-size 16g -p "${PORT}:8000" \
-  -v "$HF_CACHE:/hf" -e HF_HOME=/hf -e HF_HUB_OFFLINE=1 \
+  -v "$HF_CACHE:/hf" "${HUB_MNT[@]}" -e HF_HOME=/hf -e HF_HUB_OFFLINE=1 \
   "${PROM_ARGS[@]}" \
   "${CACHE_MNT[@]}" "${TEMPLATE_MNT[@]}" \
   -e VLLM_PLE_MMAP=1 -e VLLM_PLE_MMAP_WORKERS="${WORKERS:-32}" -e VLLM_PLE_MMAP_PREWARM="$PREWARM" \
