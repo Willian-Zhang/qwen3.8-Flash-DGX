@@ -12,7 +12,9 @@
 [Unit]
 Description=Qwen3.8-Flash-Next vLLM server (qwen38-flash)
 Documentation=file://@REPO@/README.md
-After=docker.service network-online.target
+# remote-fs.target: let the NFS hub in HF_HUB_DIRS come up first. Deliberately not
+# RequiresMountsFor=, so a dead share makes serve.sh fall back instead of failing the unit.
+After=docker.service network-online.target remote-fs.target
 Requires=docker.service
 Wants=network-online.target
 # Weights take ~8-13 min to load and RestartSec paces retries; never hit the start-rate limit.
