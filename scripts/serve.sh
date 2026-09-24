@@ -51,6 +51,8 @@
 #   PREWARM=0         1 = stream the 48 GiB table once at boot to warm the page cache
 #   WORKERS=32        threads for the mmap gather
 #   EXTRA=            extra vllm flags passed verbatim
+#   DOCKER_EXTRA=     extra docker run args passed verbatim (e.g. --cap-add=SYS_PTRACE for py-spy,
+#                     -v to bind-mount an instrumented file over the image's copy)
 #   COMPILE_CACHE=    where to keep vLLM's compiled graphs and FlashInfer's JIT modules across
 #                     boots. Unset (default) = inside the container, which this script recreates
 #                     every time, so they are rebuilt on every boot (80 s of init engine, see
@@ -276,7 +278,7 @@ docker run -d --name "$NAME" --restart unless-stopped \
   -e VLLM_PLE_MMAP=1 -e VLLM_PLE_MMAP_WORKERS="${WORKERS:-32}" -e VLLM_PLE_MMAP_PREWARM="$PREWARM" \
   -e VLLM_QSA_EXACT_TOPK="$EXACT_TOPK" "${DETENV[@]}" -e VLLM_FP8_PAD_M4="$PAD_M4" \
   -e VLLM_USE_FLASHINFER_SAMPLER=1 -e VLLM_ALLOW_LONG_MAX_MODEL_LEN="$ALLOW_LONG" \
-  "${HYBRID_ENV[@]}" \
+  "${HYBRID_ENV[@]}" ${DOCKER_EXTRA:-} \
   "$IMAGE" \
   "$SNAP_IN" --served-model-name qwen3.8-flash-next \
     --host 0.0.0.0 --port 8000 --load-format safetensors \
