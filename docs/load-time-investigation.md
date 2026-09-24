@@ -18,6 +18,7 @@ Handoff notes. Goal: cut the ~9 min of "Loading weights" at every boot of `qwen3
 
 ## State at handoff
 
+- Image: patches 1–17 (`qwen38-flash-dgx:latest`), boot 2 min 13 s.
 - Serving `nvidia/Qwen3.8-Flash-Next-NVFP4`, `MODE=hybrid` (snapshot `fc694b5…-fp8hybrid`), YaRN 500k,
   MTP=2, `COMPILE_CACHE=qwen38` (docker volumes, reused: init engine ~119 s → ~33 s), port 8000.
   Settings: `systemd/qwen38-flash.env`; unit: `systemd/qwen38-flash.service`.
@@ -42,6 +43,7 @@ Handoff notes. Goal: cut the ~9 min of "Loading weights" at every boot of `qwen3
 | 09-23 11:45 | NFS, compile cache reused | 518 + 46 s | **33 s (0.6)** | 10 min 53 s |
 | 09-24 07:04 | NFS, profiled (py-spy) | 541 + 46 s | 35 s (0.6) | ~11 min |
 | 09-24 07:34 | NFS, **patch 14** | **150 + 32 s** | 33 s (0.6) | **4 min 32 s** |
+| 09-24 12:54 | NFS, **patches 14–17** | **35 + 12 s** | 34 s (2.0) | **2 min 13 s** |
 
 Weight loading varies ±40 s boot to boot (upstream saw 464–554 s too). Measure the patch against
 the `Loading weights took` lines, not the total.
@@ -82,7 +84,9 @@ from pageable memory; leaf time is spinning inside `libcuda` and `[vdso]` (clock
 CPU waits for each small synchronous copy. `maybe_fuse_shared_experts` (models/utils.py:463) shows
 ~10% in the native profile.
 
-### CPU side is not the cost (`get_tensor` + copy into host memory, 800 KiB tensors)
+### CPU side was not the main cost before patch 14 (`get_tensor` + copy into host memory, 800 KiB tensors)
+
+With patch 14 in, this read is what is left of the expert cost; see "The rest of the boot".
 
 | | NFS | local NVMe |
 |---|---|---|
@@ -124,7 +128,6 @@ more expensively than anonymous ones. A one-line `.clone()` is as good as pinned
 
 ## Patch 14 (implemented 2026-09-24)
 
-
 `src/patch_moe_load_clone.py`: the final `expert_data.copy_(loaded_weight)` of `_load_w13` and
 `_load_w2` becomes `copy_(_qwen38_h2d_src(expert_data, loaded_weight))`, which clones a CPU,
 non-pinned source when the destination is not on the CPU. Gate `VLLM_LOAD_CLONE` (default on, read
@@ -132,14 +135,8 @@ at import). Both weights and block scales go through these two sites, the MTP dr
 too (patch 11's shim has no loader of its own; MTP load 46 → 32 s). Memory cost: one transient
 ≤ 800 KiB clone per call.
 
-The remaining main load of 150 s is not profiled. Candidates: the ~147k scalar per-tensor scales
-(`_load_per_tensor_weight_scale`, same mmap views, never measured), the linear layers,
-`maybe_fuse_shared_experts`, and whatever part of the ~3 ms per-tensor boot cost the clone does not
-remove. Options:
-- Broader variant: clone in `safetensors_weights_iterator` (model_loader/weight_utils.py) for tensors
-  below a size cap (e.g. 64 MiB), so the linear layers (~4–10%) and the MTP load (46 s) benefit too;
-  the cap skips the huge PLE tensors, which the PLE mmap patch discards anyway.
-- Re-profile one boot with py-spy to see what the remaining ~150 s is.
+The remaining 150 + 32 s are broken down in the next section.
+
 - Upstream: blazux/qwen3.8-Flash-DGX#33 (branch `moe-load-clone`, both Dockerfiles, a condensed
   write-up in `docs/HOW-IT-WORKS.md`). vLLM itself not yet: it affects every per-expert ModelOpt
   NVFP4 checkpoint on GB10.
@@ -152,6 +149,178 @@ remove. Options:
 - `scripts/smoke-test.sh localhost:8000`: coherent, effort alias OK, 2,034 tok/s prefill at 8k,
   prefix-cache hit, deterministic, 35.0 tok/s decode — same as before.
 - Rollback image: `qwen38-flash-dgx:pre-patch14`.
+
+## The rest of the boot (profiled 2026-09-24 12:10, patch 14 on)
+
+One boot recorded with `tools/profile_boot.sh`: py-spy on every process in the container, 10 s
+slices from container start to "Application startup complete", 100 Hz, idle threads included.
+Summarized with `tools/pyspy_slices.py`. Raw data: `~/run/qwen-load-profile/boot/NN-HHMMSS.txt`.
+The run needs `DOCKER_EXTRA="--cap-add=SYS_PTRACE -v /home/willian/run/qwen-load-profile:/prof"` in
+the env file for that boot, with py-spy staged once into `~/run/qwen-load-profile/pyspy` (see the
+script header). The boot matched the unprofiled one: 149 + 32 s load, ready in 4 min 32 s.
+
+### Timeline (seconds from container start, 272 s to ready)
+
+| phase | s | notes |
+|---|---|---|
+| APIServer imports + config, then EngineCore spawn + imports | 25 | plain Python imports; the multimodal registry check is ~5 s of it |
+| engine init, model construction | 7 | |
+| main `Loading weights` | 149 | table below |
+| MTP `Loading weights` | 32 | table below |
+| init engine: memory profile (dummy forward ~8 s, vision encoder profile ~6 s), KV, graphs | 34 | compile cache already reused |
+| APIServer: **multimodal warmup** (building the Qwen3-VL image processor) | 15 | EngineCore idle meanwhile |
+| rest of API startup | 6 | |
+
+### Main load, 149 s (EngineCore MainThread samples under `nvidia/model.py`)
+
+| s (≈) | frame | cause |
+|---|---|---|
+| 45 | `_qwen38_h2d_src` (patch 14's `.clone()`) | page-faulting cold file pages through the mmap view, ~1.4 GiB/s |
+| 26 | `_load_w13` / `_load_w2` `copy_` + the rest of the loader chain | the per-tensor H2D copy itself and its Python overhead |
+| 25 | `FusedMoE.load_weights` lines 900/901 | **pure Python**: every tensor is substring-matched against all 1,536 expert-mapping entries (measured in isolation: 103 µs/tensor × 297k = **30 s**). Same loop on vLLM `main`. |
+| 25 | linear layers (`parameter.py:154/176/201/230`, `linear.py:377`) | `param.copy_` straight from the mmap view, i.e. the same file-backed H2D slow path patch 14 fixed for the experts |
+| 16 | `vocab_parallel_embedding.py:487` | `embed_tokens` + `lm_head`, 2 × 1.2 GiB H2D straight from the mmap (~150 MB/s) |
+| 13–15 | `prewarm` (`PREWARM=1`) | streams the 47.7 GiB PLE table; afterwards only **12.7%** of the PLE file was still resident (mincore) — the 70 GiB weight stream that follows evicts it (inference; confirm with a `PREWARM=0` boot) |
+
+### MTP load, 32 s (under `nvidia/mtp.py`)
+
+| s (≈) | cause |
+|---|---|
+| 15 | the drafter loads its own `embed_tokens` + `lm_head` from the checkpoint (same slow H2D), then `load_eagle_model` (`v1/worker/gpu/spec_decode/eagle/utils.py`) deletes them and shares the target's (the model sets no `has_own_*` flag, so it always shares) — **wasted** |
+| 13 | `get_all_weights` walks all 11 files / 299,845 tensors to keep 3,101 MTP ones (`remap_weight_names` filters *after* `get_tensor`); a cold `get_tensor` is ~50 µs (5.5 µs warm), and the main load has evicted the pages by then. 3,072 of the MTP tensors are in `model-fp8-mtp-ple.safetensors`, 29 in `model-00009`/`00010` |
+| ~4 | the MTP experts and layers themselves |
+
+### Read-path measurements (CPU only, client cache dropped, byte-identical)
+
+| read path for the weight + block-scale tensors | GiB/s | ms/tensor |
+|---|---|---|
+| mmap `get_tensor` + `.clone()` (patch 14 today), cold | 1.39 | 0.339 |
+| **`pread` each tensor straight into a fresh CPU tensor**, cold | **3.15** | **0.138** |
+| sequential 16 MiB `pread` of the region, cold | 4.30 | — |
+| mmap `get_tensor` + `.clone()`, region already cached | 4.64 | 0.147 |
+
+(Shard 00005, alternating 256 MiB regions between the two methods. A first try on shard 00007 with
+~1 GiB regions measured 0.47 GiB/s for the mmap path; the rate depends on how the faults line up.)
+
+In the loader's real order (`f.keys()`, by name), a whole shard, cold client cache verified with
+`mincore` (0.3% resident before):
+
+| read path | shard 00006 (8.97 GiB, 39,597 tensors) | shard 00002 |
+|---|---|---|
+| mmap `get_tensor` + `.clone()` | 4.13 s = 2.17 GiB/s | 3.95 s = 2.26 GiB/s |
+| `pread` per tensor | **0.82 s = 10.9 GiB/s** | 0.82 s = 10.9 GiB/s |
+
+Caveat: `POSIX_FADV_DONTNEED` cannot drop pages that are still mapped, so a cold measurement
+needs the file unmapped everywhere (vLLM maps none after boot, checked in `/proc/*/maps`). The
+kc3000 server has the files in RAM, the same as in a real boot. A clone of an 800 KiB tensor
+that is already in ordinary memory costs 9.8 µs, so patch 14's clone is redundant after (a)
+(~1.5 s in total); (a) tags the storage it allocates and patch 14 skips those.
+
+### How these interact with the PLE offload
+
+The PLE table (`model-fp8-mtp-ple.safetensors`, 128 tensors `ngram_embedding.shard_N` of 381 MiB,
+47.7 GiB) is not loaded by vLLM's loader. `src/vllm_ple_mmap.py` finds the shards' offsets in the
+safetensors header itself, maps them with its own `np.memmap` (`MADV_RANDOM`), and its
+`load_weights` drops the tensors the loader hands it ("served from disk, never materialised").
+At inference each step gathers rows from that memmap: page-cache hits are cheap, misses go to NFS.
+
+- a: must never read the shards. They are above the 64 MiB cap, and the patch also skips
+  `ngram_embedding.shard_*` by name, so another checkpoint layout with small shards cannot
+  make it read 47.7 GiB into RAM.
+- e: sits in `VocabParallelEmbedding.weight_loader`; the PLE layer is a placeholder
+  (`_MmapNgramEmbedding`, not a `VocabParallelEmbedding`), and its shards never reach a
+  weight loader.
+- b, c, d, g: nothing to do with the table.
+- **What does interact is the page cache**, where the PLE's hot rows live. The weight load streams
+  ~70 GiB of checkpoint pages through it; they are useless once the weights are on the GPU. That
+  happens with mmap or with `pread` alike, so a neither helps nor hurts here.
+
+### Correction: f (`PREWARM=0`) withdrawn
+
+The 12.7% PLE residency above was measured *after* benchmarks that had read several GiB of other
+shards, so it does not show that the weight load evicts the prewarmed table. Even if it does, the
+right fix is not to drop the prewarm but to stop the loader from evicting it: after reading a
+file's tensors, `posix_fadvise(DONTNEED)` the ranges it read (never the PLE table's), so the
+prewarmed rows survive (f' below). Upper bound: ~18 GiB of page cache is left after boot, i.e.
+at most ~38% of the table. Measure first: PLE residency right at "Application startup complete",
+before any request, with and without f'.
+
+### c and d in plain words
+
+The MTP drafter is loaded as a second model after the main one, by the same loader, from the
+same checkpoint.
+
+- **c**: the checkpoint has one `embed_tokens` and one `lm_head` (1.2 GiB each). The main model
+  loads them. Then the drafter loads its *own* copy of both, and immediately afterwards vLLM
+  (`load_eagle_model`) deletes the drafter's copies and points the drafter at the main model's.
+  So ~2.4 GiB is copied to the GPU for nothing (~15 s today, ~2–3 s once e is in). The fix: don't
+  load them in the drafter (keep the empty parameters, vLLM replaces them anyway).
+- **d**: to find its ~3,100 tensors, the drafter's loader opens every file and creates all
+  299,845 tensors, then throws away everything that isn't an MTP weight by name. Creating a
+  tensor costs ~50 µs when its pages are cold, so ~13 s go to tensors that are discarded. The
+  fix: check the name *before* creating the tensor (vLLM already has a hook for that,
+  `should_skip_weight`), or open only the 3 files that hold MTP weights.
+- **a without d**: with a, the drafter's pass *reads* every small tensor (~70 GiB, all the main
+  model's) before discarding it, instead of only creating views. At 10.9 GiB/s that is ~7 s,
+  no slower than today's ~13 s, but all of it wasted I/O and page-cache churn. d removes it.
+
+### Fix candidates
+
+| # | change | est. saving | risk / notes |
+|---|---|---|---|
+| a | **`pread` loader**: in `safetensors_weights_iterator`, return tensors ≤ 64 MiB as `pread` copies into ordinary memory instead of mmap views (bigger ones, e.g. the PLE table and embeddings, stay views). Covers experts, scales, linear layers, MTP. Patch 14's clone becomes a no-op for them (the source is no longer file-backed). | ~60–70 s (expert clone 45 → ~18, linear 25 → ~5, plus scales) | one site; transient memory one tensor; the scalars also stop page-faulting |
+| b | **MoE name-match index**: build `{weight_name: entries}` once per layer and look up by the `experts.N.proj.` fragment of the name instead of scanning 1,536 entries | ~25–30 s | pure Python, byte-identical; worth upstreaming to vLLM too |
+| c | **MTP: skip the drafter's `embed_tokens` / `lm_head`** in `Qwen3_8FlashNextMTP.load_weights` when the target shares them (always, here) | ~15 s | must keep the parameters so the shape check / sharing still works; they are replaced right after |
+| d | **MTP: skip non-MTP names before `get_tensor`** (filter by name in the iterator, or pass only the files the index maps MTP weights to) | ~12 s | vLLM already has a hook: `should_skip_weight(name, ...)` right before `get_tensor` |
+| e | **Large tensors (`embed_tokens`, `lm_head`)**: copy to the GPU in 64 MiB pieces, each cloned into ordinary memory first | ~12 s | only 2 tensors (4 with the MTP pass); bounded memory |
+| ~~f~~ | ~~`PREWARM=0`~~ — withdrawn, see the correction above | | |
+| f' | **loader drops its own pages** (`DONTNEED` on the ranges read, not the PLE table) so the prewarm survives | 0 s at boot; faster first requests | measure PLE residency after boot first |
+| g | **`--language-model-only`** (config only; the model supports it: vision tower becomes a `StageMissingLayer`, `visual.` weights skipped) | ~15 s API warmup + ~6 s encoder profile + a little memory | drops image input; the QSA fused rope path is also enabled with it (`qsa.py:298`, `text_only`) — check the smoke test and determinism |
+
+a + b + c + d + e + g together would take the boot from ~4 min 32 s to roughly 2–2.5 min (estimate).
+The weight-load parts (a–e, f') are code patches in the repo's style; g is an env-file change.
+
+**Implemented: a, b, e** as patches 15, 16, 17 (below). c, d, f', g not yet.
+
+## Patches 15–17 (implemented 2026-09-24)
+
+| patch | file | gate (default on) | what |
+|---|---|---|---|
+| 15 (a) | `src/patch_load_pread.py` | `VLLM_LOAD_PREAD=0` disables | `safetensors_weights_iterator`: tensors ≤ 64 MiB are `pread` into ordinary memory, storage tagged `_qwen38_anon`; > 64 MiB and `ngram_embedding.shard_*` stay mmap views. Wraps patch 14's `_qwen38_h2d_src` to skip the clone for tagged tensors (needs 14). |
+| 16 (b) | `src/patch_moe_name_index.py` | `VLLM_MOE_NAME_INDEX=0` | `RoutedExperts.load_weights` iterates only the mapping entries whose `weight_name` occurs in the tensor name (lookup at each `experts.` position, `{len: {name: [idx]}}`), original order, fused tensors cut at the first consecutive run like the original `break`. Full scan if an entry does not start with `experts.`. |
+| 17 (e) | `src/patch_embed_chunked_copy.py` | `VLLM_LOAD_EMBED_CHUNK=0` | `VocabParallelEmbedding.weight_loader`: CPU → GPU in 64 MiB row blocks, each cloned into ordinary memory first; direct copy for tagged, pinned, 0-d or shape-mismatched sources. |
+
+Preview `Dockerfile` only (not `Dockerfile.v0.29`, not in the upstream PR yet).
+
+### Validation (12:54 boot)
+
+- CPU tests in the image: `src/test_moe_name_index_cpu.py` — 22,516 name/config cases (512 experts,
+  EPLB redundant experts, w1/w2/w3 names, LoRA prefix, fused and per-expert-fused names) identical
+  to the original loop, 73.5 → 1.1 µs per tensor. `src/test_load_patches_cpu.py` on
+  `model-00009`, `model-00010` and `model-fp8-mtp-ple` — every small tensor byte-identical to the
+  stock iterator; `embed_tokens`/`lm_head` stay views; all 128 PLE shards stay unread views.
+  Chunked copy == plain copy for uneven row counts. Patch 14 wrapper: tagged → no clone,
+  untagged → clone.
+- Boot: main load **149 → 35 s**, MTP **32 → 12 s**, "Model loading took" 191 → 56 s, startup
+  **4 min 32 s → 2 min 13 s**. 74.9 GiB model memory, KV pool 721,212 tokens. Loader log: per
+  pass, `model-00009` 9,044 tensors read / 2 views (embeddings), PLE file 3,073 read / 128 views.
+- `scripts/greedy-probe.sh post-p15-solo` vs `pre-p15` (taken on the patch 14 boot): all 5 prompts
+  identical in text and first-token logprobs. `scripts/smoke-test.sh`: deterministic, prefix-cache
+  hit, 36.1 tok/s decode (35.0 before). No clean cold-prefill number from this boot (the smoke
+  prompt was already prefix-cached by then).
+- **Pitfall hit:** the first smoke test and probe were run *concurrently* — `Running: 2 reqs` in
+  the engine log — which changes batch shapes: 2–3 of 5 probe texts flipped (even between two
+  probes in the same boot), "logprobs identical: NO", 1,437 tok/s prefill, 27.5 tok/s decode. Run
+  them one after the other.
+- PLE residency at "Application startup complete", before any request: **8.5%** of the 50 GiB file
+  (clean measurement this time). So `PREWARM=1`'s 47.7 GiB stream is almost entirely evicted by
+  the time the server is up — the case for f'.
+- Rollback images: `qwen38-flash-dgx:pre-patch15` (patch 14 only), `:pre-patch14`.
+
+The new timeline: container start → EngineCore init 23 s, model construction + prewarm start 6 s,
+main load 35 s (the PLE prewarm runs inside it), MTP load 12 s, init engine 34 s, API
+multimodal warmup 14 s, rest ~9 s. Remaining candidates: c (~2–3 s now that e is in), d (the MTP
+pass still reads the whole checkpoint), f' (page cache), g (~20 s, config).
 
 ## Rerunning the benchmark
 
