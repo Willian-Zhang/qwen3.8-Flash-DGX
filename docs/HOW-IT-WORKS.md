@@ -623,3 +623,76 @@ The hybrid layout needed one more change: `vllm_fp8_hybrid_modelopt.py` used to 
 `ModelOptNvFp4Config`; on the mixed config the fp8-converted side layers were caught by the
 checkpoint's exclude list and sent to the bf16 path. It now patches both classes.
 
+## Weight loading: the per-expert H2D copy (patch 14)
+
+About 9 of the ~11 minutes of a boot were "Loading weights": main model 450–541 s, MTP drafter
+~46 s, on `nvidia/Qwen3.8-Flash-Next-NVFP4` in the hybrid layout. Storage was not the bottleneck.
+Local NVMe and an NFS share loaded within the ±40 s boot-to-boot noise of each other, iowait
+stayed around 0.5%, and one core was busy.
+
+A py-spy profile of the EngineCore during loading (60 s, 99% of samples in `load_weights`):
+
+| self time | frame |
+|---|---|
+| 59.6% | `RoutedExperts._load_w13` → `expert_data.copy_(loaded_weight)` |
+| 29.6% | `RoutedExperts._load_w2` → `expert_data.copy_(loaded_weight)` |
+| ~5% | `FusedMoE.load_weights` |
+| ~4% | linear layers (`load_merged_column_weight`, `load_row_parallel_weight`, `load_qkv_weight`) |
+
+Every routed expert arrives as separate tensors: 48 layers × 512 experts × 3 projections, each an
+800 KiB NVFP4 weight plus a 100 KiB fp8 block scale, about 149k tensors in all. vLLM copies each
+one to the GPU on its own, straight from the safetensors mmap view. In the native profile the time
+is `cuMemcpyHtoDAsync_v2` from pageable memory, with the CPU spinning in `libcuda` through each
+small synchronous copy.
+
+A micro-benchmark on one real 9 GiB expert shard (`tools/bench_moe_load.py`). Each variant ran in
+a fresh process on a shard no earlier run had touched, with the client page cache dropped, and
+every variant produced byte-identical weights:
+
+| variant | ms / tensor |
+|---|---|
+| **A** vLLM today: mmap view → `param.copy_()` | 1.74 |
+| **E** the shard read into the page cache first, then A | 1.86–1.89 |
+| **F** `.clone()` the mmap view, then the same `copy_` | **0.23** |
+| **B** a reused pinned bounce buffer | 0.22–0.26 |
+| **C** pinned staging per 3,072 tensors, one H2D + a GPU scatter | 0.25 |
+
+The copy is slow whenever its source is a file-backed page, cached (E) or not (A). From ordinary
+anonymous memory it is fast (F), and a plain clone does as well as pinned staging (B, C). The cause
+is not verified. The likely place is the driver's pageable-copy path on GB10's unified memory, which
+appears to handle file-backed pages far more expensively than anonymous ones. Reading the data is
+not the cost: copying the same mmap view into host memory takes 0.03–0.7 ms depending on the
+cache state, and a `pread()` 0.04–0.07 ms.
+
+The fix is `src/patch_moe_load_clone.py`. In `_load_w13` and `_load_w2`, when the source is a CPU
+tensor that is not pinned and the destination is not on the CPU, the copy now reads from
+`loaded_weight.clone()`. Weights and block scales both go through these two sites, and so do the
+MTP drafter's block-fp8 experts. The memory cost is one transient tensor of at most 800 KiB.
+`VLLM_LOAD_CLONE=0` restores the stock copy.
+
+One boot on the preview image (`MODE=hybrid`, NVIDIA checkpoint, weights on NFS, compile cache
+reused):
+
+| | before | patch 14 |
+|---|---|---|
+| Loading weights, main model | 450–541 s | **150 s** |
+| Loading weights, MTP drafter | 46 s | **32 s** |
+| startup to "Application startup complete" | ~11 min | **4 min 32 s** |
+
+Model memory (74.9 GiB), the KV pool (718k tokens, within the usual boot-to-boot range) and
+`scripts/smoke-test.sh` (prefix-cache hit, identical first-token logprobs across runs, 35 tok/s
+decode) are unchanged. RadixArk's checkpoint has the same per-expert layout and should benefit the
+same way, but it has not been measured.
+
+Ruled out:
+
+- `--safetensors-load-strategy prefetch`. vLLM skips it because the checkpoint is larger than free
+  RAM, and E shows that a warm page cache would not help anyway.
+- `eager` and `enable_multithread_load`. Both read whole files into RAM, and one file is the 50 GiB
+  PLE shard, with only 2–5 GiB free during loading.
+
+The remaining 150 s has not been profiled yet. Each tensor costs about 3 ms in a real boot, more
+than the micro-benchmark's 1.74 ms, and the patch recovers most but not all of that. Likely
+candidates are the linear layers and about 147k scalar per-tensor scales (`weight_scale_2`,
+`input_scale`), which vLLM assigns one at a time from the same mmap views.
+

@@ -17,6 +17,7 @@
 #  11. ModelOpt mixed-precision block-FP8 experts     (VLLM_MODELOPT_BLOCK_MOE=0 disables)
 #  12. Lossless malformed Qwen tool preambles        (always on for the qwen3 parser)
 #  13. Quoted tool markers stay text, not calls     (always on for the qwen3 parser)
+#  14. Clone mmap weights before the MoE H2D copy    (VLLM_LOAD_CLONE=0 disables)
 #
 #   docker build -t qwen38-flash-dgx .
 #
@@ -170,3 +171,10 @@ RUN cd ${SP} && patch --batch --forward --fuzz=0 -p1 < /tmp/qwen-tool-preamble.p
 COPY src/patches/qwen-tool-marker-guard.patch /tmp/qwen-tool-marker-guard.patch
 RUN cd ${SP} && patch --batch --forward --fuzz=0 -p1 < /tmp/qwen-tool-marker-guard.patch \
  && rm /tmp/qwen-tool-marker-guard.patch
+
+# --- 14. MoE weight loading: clone the mmap view before the H2D copy (VLLM_LOAD_CLONE=0 disables) ---
+# On GB10 a per-expert copy_ to the GPU straight from a file-backed safetensors page is ~1.7 ms per
+# 800 KiB tensor, ~0.23 ms from ordinary memory, for ~149k expert tensors: weight loading 541 -> 150 s.
+# Byte-identical weights; see docs/HOW-IT-WORKS.md.
+COPY src/patch_moe_load_clone.py /tmp/patch_moe_load_clone.py
+RUN python3 /tmp/patch_moe_load_clone.py ${SP} && rm /tmp/patch_moe_load_clone.py

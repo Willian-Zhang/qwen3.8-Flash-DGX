@@ -663,6 +663,23 @@ cache warm, only the Triton volume emptied — and came out at 37.2 s against bo
 0.2 s difference, an order of magnitude below the capture noise. The five warnings appear in every
 boot either way, warm or cold. Mounting it would have been cargo cult.
 
+## Faster weight loading (patch 14, default on)
+
+Most of a boot used to be "Loading weights", and the cause was not the disk. vLLM copies each of
+the ~149k routed-expert tensors to the GPU on its own, straight from the memory-mapped checkpoint.
+On GB10 that copy costs ~1.7 ms per 800 KiB tensor when the source is a file-backed page, and
+~0.23 ms from ordinary memory. Patch 14 clones each tensor before the copy, which produces the
+same bytes and uses one transient tensor of scratch memory. With the compile cache reused as
+above, the whole startup drops from ~11 min to 4 min 32 s:
+
+| (DGX Spark, hybrid, NVIDIA checkpoint) | before | patch 14 |
+|---|---|---|
+| Loading weights, main model | 450–541 s | 150 s |
+| Loading weights, MTP drafter | 46 s | 32 s |
+
+It is on in both images. To compare against the stock copy, add `-e VLLM_LOAD_CLONE=0` to the
+`docker run` line in `scripts/serve.sh`. The profile, the benchmark and what was ruled out are in [HOW-IT-WORKS](docs/HOW-IT-WORKS.md#weight-loading-the-per-expert-h2d-copy-patch-14).
+
 ## Reduced draft vocabulary (`DRAFT_VOCAB=1`, default)
 
 vLLM shares the target model's `lm_head` with the MTP draft, so every draft step scores all
@@ -1083,10 +1100,13 @@ src/vllm_modelopt_block_moe.py   11. FP8_BLOCK_SCALES layers in ModelOpt mixed c
                                      experts) -> vLLM's block-fp8 MoE method. Preview base only; the v0.29
                                      image uses the vllm#55513 backport instead           VLLM_MODELOPT_BLOCK_MOE=0 disables
 src/patch_qsa_fp8_kv.py           7. fp8_e4m3 KV cache on the QSA path (by @Nanetnounou) --kv-cache-dtype fp8_e4m3
+src/patch_moe_load_clone.py      14. clone mmap-backed expert weights before the H2D copy          VLLM_LOAD_CLONE=0 disables
+                                     (main weight load 541 -> 150 s on a Spark; docs/HOW-IT-WORKS.md)
 src/test_ple_mmap_cpu.py          CPU unit test for the gather (no GPU needed)
 src/test_qsa_exact_topk_cpu.py    CPU unit test for the exact top-k (no GPU needed)
 src/test_block_fp8_mtp_cpu.py     CPU unit test for the vllm#55513 backport (no GPU needed; v0.29 image)
 tools/fp8_convert.py              side-layer bf16 -> blockwise fp8 (by @Saren-Arterius)
+tools/bench_moe_load.py           per-expert H2D copy micro-benchmark behind patch 14 (needs a free GPU)
 scripts/download-weights.sh       MODEL (default nvidia/Qwen3.8-Flash-Next-NVFP4), EXCLUDE, MAX_WORKERS, XET
 scripts/prepare-hybrid.sh         one-time: build the -fp8hybrid snapshot
 scripts/prepare-mtp-graft.sh      one-time: graft the NVFP4 MTP draft experts onto it (MODE=hybrid-mtp, RadixArk only)
