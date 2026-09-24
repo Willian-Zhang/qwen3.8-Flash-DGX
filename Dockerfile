@@ -18,6 +18,9 @@
 #  12. Lossless malformed Qwen tool preambles        (always on for the qwen3 parser)
 #  13. Quoted tool markers stay text, not calls     (always on for the qwen3 parser)
 #  14. Clone mmap weights before the MoE H2D copy    (VLLM_LOAD_CLONE=0 disables)
+#  15. pread small checkpoint tensors, not mmap     (VLLM_LOAD_PREAD=0 disables; needs 14)
+#  16. Indexed FusedMoE expert-name matching        (VLLM_MOE_NAME_INDEX=0 disables)
+#  17. Embeddings copied to the GPU in 64 MiB pieces (VLLM_LOAD_EMBED_CHUNK=0 disables)
 #
 #   docker build -t qwen38-flash-dgx .
 #
@@ -178,3 +181,14 @@ RUN cd ${SP} && patch --batch --forward --fuzz=0 -p1 < /tmp/qwen-tool-marker-gua
 # Byte-identical weights; see docs/HOW-IT-WORKS.md.
 COPY src/patch_moe_load_clone.py /tmp/patch_moe_load_clone.py
 RUN python3 /tmp/patch_moe_load_clone.py ${SP} && rm /tmp/patch_moe_load_clone.py
+
+# --- 15-17. The rest of weight loading (docs/load-time-investigation.md, "The rest of the boot") ---
+# 15: tensors <= 64 MiB are read with pread into ordinary memory instead of yielded as mmap views
+#     (~10.9 vs ~2.2 GiB/s in the loader's order); the PLE table shards are never read.
+# 16: RoutedExperts.load_weights looks names up in an index instead of substring-testing all 1,536
+#     mapping entries per tensor (~30 s of pure Python); same entries, same order.
+# 17: VocabParallelEmbedding copies embed_tokens / lm_head in 64 MiB pieces via ordinary memory.
+COPY src/patch_load_pread.py src/patch_moe_name_index.py src/patch_embed_chunked_copy.py /tmp/
+RUN python3 /tmp/patch_load_pread.py ${SP} && python3 /tmp/patch_moe_name_index.py ${SP} \
+ && python3 /tmp/patch_embed_chunked_copy.py ${SP} \
+ && rm /tmp/patch_load_pread.py /tmp/patch_moe_name_index.py /tmp/patch_embed_chunked_copy.py

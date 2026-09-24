@@ -1175,11 +1175,20 @@ src/patch_qsa_fp8_kv.py           7. fp8_e4m3 KV cache on the QSA path (by @Nane
 src/patch_moe_load_clone.py      14. clone mmap-backed expert weights before the H2D copy          VLLM_LOAD_CLONE=0 disables
                                      (main weight load 541 -> 150 s on a Spark; docs/HOW-IT-WORKS.md)
 src/patches/*-v030.patch          patches 12 and 13 rebased on the v0.30 parser engine
+src/patch_load_pread.py          15. pread checkpoint tensors <= 64 MiB instead of mmap views     VLLM_LOAD_PREAD=0 disables
+                                     (never the PLE table; needs 14). Preview image only
+src/patch_moe_name_index.py      16. indexed FusedMoE expert-name matching (~30 s of Python)        VLLM_MOE_NAME_INDEX=0 disables
+src/patch_embed_chunked_copy.py  17. embed_tokens / lm_head copied to the GPU in 64 MiB pieces     VLLM_LOAD_EMBED_CHUNK=0 disables
+                                     15-17 together: weight load 150 + 32 s -> 35 + 12 s (docs/load-time-investigation.md)
 src/test_ple_mmap_cpu.py          CPU unit test for the gather (no GPU needed)
 src/test_qsa_exact_topk_cpu.py    CPU unit test for the exact top-k (no GPU needed)
 src/test_block_fp8_mtp_cpu.py     CPU unit test for the vllm#55513 backport (no GPU needed; v0.29 image)
+src/test_moe_name_index_cpu.py    CPU unit test: patch 16 visits exactly the entries of the original loop
+src/test_load_patches_cpu.py      CPU check of patches 15 and 17 against real checkpoint files
 tools/fp8_convert.py              side-layer bf16 -> blockwise fp8 (by @Saren-Arterius)
 tools/bench_moe_load.py           per-expert H2D copy micro-benchmark behind patch 14 (needs a free GPU)
+tools/profile_boot.sh             py-spy every process of a boot in 10 s slices (needs SYS_PTRACE, see header)
+tools/pyspy_slices.py             summarize those slices by process / thread / frame
 scripts/download-weights.sh       MODEL (default nvidia/Qwen3.8-Flash-Next-NVFP4), EXCLUDE, MAX_WORKERS, XET
 scripts/prepare-hybrid.sh         one-time: build the -fp8hybrid snapshot
 scripts/prepare-mtp-graft.sh      one-time: graft the NVFP4 MTP draft experts onto it (MODE=hybrid-mtp, RadixArk only)
