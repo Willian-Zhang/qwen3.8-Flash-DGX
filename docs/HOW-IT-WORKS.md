@@ -696,3 +696,41 @@ than the micro-benchmark's 1.74 ms, and the patch recovers most but not all of t
 candidates are the linear layers and about 147k scalar per-tensor scales (`weight_scale_2`,
 `input_scale`), which vLLM assigns one at a time from the same mmap views.
 
+
+## The vLLM v0.30.0 port (`Dockerfile.v0.30`)
+
+Three things moved under the recipe in v0.30.0, and the port follows each one.
+
+**PLE lookup.** The n-gram module left `ple_layer.py` for `ngram_embedding.py`. The hashing is a
+Triton kernel (`ops/ple.py`) called through `compute_ngram_ids`, and the lookup goes through
+`Qwen4ExpPLEDeviceEmbedding`, or `Qwen4ExpPLEPinnedHostEmbedding` with engram CPU offload.
+`src/vllm_ple_mmap.py` gained `_apply_v030`: during `__init__` both embedding classes are swapped
+for the mmap placeholder, the stock hashing is kept, and the lookup goes through the same
+`ple_mmap_lookup_ids` op as on v0.29. The placeholder answers the new calls the layer makes
+(`dequantize`, `supports_prefetch`, a dummy `weight` for the init log line).
+
+**CUDA graphs.** v0.30 lists Qwen4Exp among the architectures that get *breakable* CUDA graphs by
+default (`VLLM_USE_BREAKABLE_CUDAGRAPH`): torch.compile is off and one capture drives the whole
+forward, ending a graph segment around every op that must run eagerly. Our gather is CPU work plus
+a host-to-device copy, so it cannot be captured. Three consequences, each hit on a real boot:
+
+1. The gather ends the segment itself through the capture's `add_eager` (a synchronize inside a
+   capture is `cudaErrorStreamCaptureUnsupported`).
+2. It writes into a persistent per-layer output buffer, sliced per batch. An eager segment must
+   write to the same address on every replay.
+3. At capture time the kernels queued before it, the n-gram hashing among them, are recorded and
+   not run, so the ids hold garbage. While a capture context is open, even paused, the eager
+   segment only zero-fills its output. At replay the segments run in order and the ids are real.
+
+`-cc.splitting_ops` in `scripts/serve.sh` still carries a v0.30 list for the FX path
+(`VLLM_USE_BREAKABLE_CUDAGRAPH=0`), which has not been measured.
+
+**QSA top-k.** vllm#54513 split the indexer into prefill and decode paths that share one `_topk`
+helper in `ops/qsa_indexer.py`. `patch_qsa_exact_topk.py` recognises both spellings of the call, and
+`src/patch_qsadet.py` replaces the upstream wiring script for the deterministic kernel, which only
+knew the v0.29 file. The stock kernel changed too (vllm#54110, vllm#56346); `scripts/smoke-test.sh`
+and the tournament's determinism probe re-measure GB10 determinism on every boot, and both pass with
+our kernel.
+
+Patches 12 and 13 are the same changes rebased on the v0.30 parser engine; the 30-case test module
+passes unchanged. Patch 11 (vllm#55513) is in the release.

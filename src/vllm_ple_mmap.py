@@ -699,7 +699,10 @@ def apply(cls: type) -> None:
     if getattr(cls, "_ple_mmap_patched", False):
         return
     if not hasattr(cls, "forward_impl"):
-        _apply_v029(cls)
+        if hasattr(sys.modules[cls.__module__], "Qwen4ExpPLEDeviceEmbedding"):
+            _apply_v030(cls)
+        else:
+            _apply_v029(cls)
         return
     mod = sys.modules[cls.__module__]
     orig_init = cls.__init__
@@ -906,3 +909,188 @@ def _apply_v029(cls: type) -> None:
     cls._setup_table = _setup_table_v029
     cls._ple_mmap_patched = True
     logger.info("PLE mmap patch (v0.29 layout) applied to %s.%s", cls.__module__, cls.__name__)
+
+
+class _MmapNgramEmbeddingV030(_MmapNgramEmbedding):
+    """v0.30 placeholder: the n-gram module now asks the embedding itself to
+    dequantize, log its ``weight`` and answer ``supports_prefetch``."""
+
+    supports_prefetch = False
+
+    def __init__(self, num_embeddings: int, embedding_dim: int) -> None:
+        super().__init__(num_embeddings, embedding_dim)
+        # Only read by the init log line (dtype / device / is_pinned); never used for lookup.
+        self.weight = torch.zeros((1, 1), dtype=torch.uint8)
+        self.weight_scale: torch.Tensor | None = None
+
+    def start_prefetch(self, hidden_states: torch.Tensor, ngram_ids: torch.Tensor) -> None:
+        return None
+
+    def dequantize(self, embeddings: torch.Tensor, output_dtype: torch.dtype) -> torch.Tensor:
+        table = self.table
+        if table is not None and table.torch_dtype in _FP8_DTYPES.values():
+            scale = self.weight_scale
+            if scale is None:
+                raise RuntimeError("PLE mmap: FP8 table without ngram_embedding.weight_scale")
+            return embeddings.to(output_dtype) * scale.to(device=embeddings.device, dtype=output_dtype)
+        return embeddings.to(output_dtype)
+
+
+def _apply_v030(cls: type) -> None:
+    """vLLM >= 0.30 layout (``vllm/models/qwen4_exp/nvidia/ngram_embedding.py``).
+
+    Hashing moved to a Triton kernel (``ops/ple.py``) reached through
+    ``compute_ngram_ids``; the lookup goes through ``Qwen4ExpPLEDeviceEmbedding``
+    (resident) or ``Qwen4ExpPLEPinnedHostEmbedding`` (engram cpu_offload), both
+    built inside ``__init__``. We swap them for the mmap placeholder for the
+    duration of ``__init__``, keep the stock hashing, and route the lookup through
+    the ``ple_mmap_lookup_ids`` op so it stays outside CUDA graphs and opaque to
+    torch.compile, exactly as on v0.29.
+    """
+    mod = sys.modules[cls.__module__]
+    orig_init = cls.__init__
+    orig_load_weights = cls.load_weights
+    embed_attrs = [
+        a for a in ("Qwen4ExpPLEDeviceEmbedding", "Qwen4ExpPLEPinnedHostEmbedding")
+        if hasattr(mod, a)
+    ]
+    if "Qwen4ExpPLEDeviceEmbedding" not in embed_attrs:
+        raise RuntimeError(f"PLE mmap: {mod.__name__} has no Qwen4ExpPLEDeviceEmbedding; layout not recognised")
+
+    def __init__(self, config, embedding_dim, ple_dense_layer_id, max_total_tokens, *,
+                 data_parallel_rank, prefix, quant_config=None, params_dtype=None):
+        real = {a: getattr(mod, a) for a in embed_attrs}
+        for a in embed_attrs:
+            setattr(mod, a, lambda n, d, **_kw: _MmapNgramEmbeddingV030(n, d))
+        try:
+            orig_init(self, config, embedding_dim, ple_dense_layer_id, max_total_tokens,
+                      data_parallel_rank=data_parallel_rank, prefix=prefix,
+                      quant_config=None, params_dtype=params_dtype)
+        finally:
+            for a, real_cls in real.items():
+                setattr(mod, a, real_cls)
+        self._ple_mmap_prefix = prefix
+        self._ple_mmap_max_tokens = int(max_total_tokens or 0)
+        _REGISTRY[prefix] = self
+        self._ple_mmap_model_path = None
+        try:
+            from vllm.config import get_current_vllm_config
+            self._ple_mmap_model_path = get_current_vllm_config().model_config.model
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("PLE mmap: cannot read model path from vllm config: %s", exc)
+        if params_dtype is not None:
+            self.ngram_embedding._zeros_dtype = params_dtype
+        logger.info(
+            "PLE mmap (v0.30 layout): %s -> placeholder embedding (%d rows x %d), table will be mmapped",
+            prefix, self.ngram_embedding.org_vocab_size, self.head_dim,
+        )
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loaded: set[str] = set()
+        rest: list[tuple[str, torch.Tensor]] = []
+        dev = torch.accelerator.current_accelerator()
+        for name, w in weights:
+            if name.startswith("ngram_embedding.shard_") and name.endswith(".weight"):
+                loaded.add(name)  # served from disk, never materialised
+                continue
+            if name == "ngram_embedding.weight_scale":
+                scale = w.detach().to(device=dev)
+                self.register_buffer("_offload_weight_scale", scale, persistent=False)
+                self.ngram_embedding.weight_scale = scale
+                loaded.add(name)
+                continue
+            rest.append((name, w))
+        loaded.update(orig_load_weights(self, rest))
+        self._setup_table()
+        if getattr(self.ngram_embedding, "weight_scale", None) is None and hasattr(self, "_offload_weight_scale"):
+            self.ngram_embedding.weight_scale = self._offload_weight_scale
+        return loaded
+
+    def _out_buffer(self, rows: int, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+        """Static output rows: v0.30 runs piecewise CUDA graphs as *breakable* captures
+        (no torch.compile, no FX splitting). An op that runs eagerly between two graph
+        segments must write into a buffer whose address is the same on every replay, so
+        the lookup output lives in one persistent tensor per layer, sliced per batch."""
+        buf = getattr(self, "_ple_mmap_buf", None)
+        if buf is None or buf.shape[0] < rows or buf.dtype != dtype or buf.device != device:
+            cap = max(rows, int(getattr(self, "_ple_mmap_max_tokens", 0) or 0))
+            buf = torch.empty((cap, self.embedding_dim), dtype=dtype, device=device)
+            self._ple_mmap_buf = buf
+        return buf[:rows]
+
+    def forward(self, hidden_states, input_ids, query_start_loc, ngram_context):
+        ngram_ids = self.compute_ngram_ids(input_ids, query_start_loc, ngram_context)
+        table = self.ngram_embedding.table
+        dtype = table.torch_dtype if table is not None else self.ngram_embedding._zeros_dtype
+        output = self._out_buffer(ngram_ids.shape[0], dtype, input_ids.device)
+        op = getattr(torch.ops.vllm, _OP_NAME_IDS)
+        prefix = self._ple_mmap_prefix
+        capture = _breakable_capture()
+        if capture is not None:
+            # Inside a breakable capture: end the graph segment, run the gather eagerly,
+            # record it for replay, resume capture (what vLLM's attention ops do through
+            # @eager_break_during_capture; done by hand so it works whichever way the
+            # runner enabled breakable graphs, and never inside a FULL capture).
+            ids_ref, out_ref = _weak_capture_arg(ngram_ids), _weak_capture_arg(output)
+            capture.add_eager(lambda: _eager_lookup(op, ids_ref, out_ref, prefix))
+        else:
+            op(ngram_ids, output, prefix)
+        return output
+
+    _register_op()
+    cls.__init__ = __init__
+    cls.load_weights = load_weights
+    cls.forward = forward
+    cls._out_buffer = _out_buffer
+    cls._setup_table = _setup_table_v029
+    cls._ple_mmap_patched = True
+    logger.info("PLE mmap patch (v0.30 layout) applied to %s.%s", cls.__module__, cls.__name__)
+
+
+def _eager_lookup(op, ngram_ids, output, prefix) -> None:
+    """The eager segment. At capture time the kernels queued before us (the n-gram hashing
+    among them) were recorded, not run, so ``ngram_ids`` holds whatever the pool had: no real
+    gather then, just a defined output. At replay the segments run in order and the ids are
+    real."""
+    if _inside_capture_context():
+        output.zero_()
+        return
+    op(ngram_ids, output, prefix)
+
+
+def _inside_capture_context() -> bool:
+    """True while a breakable capture context is open, capturing or paused. ``add_eager``
+    pauses the capture around the eager call, so the *capturing* flag is off exactly when
+    this runs at capture time; the context object itself is what tells capture from replay."""
+    try:
+        from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+    except Exception:
+        return False
+    return BreakableCUDAGraphCapture.current() is not None
+
+
+def _breakable_capture():
+    """The active breakable CUDA-graph capture, if we are inside one and it is capturing."""
+    try:
+        from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+    except Exception:  # older vLLM: no such mechanism
+        return None
+    capture = BreakableCUDAGraphCapture.current()
+    if capture is None or not getattr(capture, "_capturing", False):
+        return None
+    try:
+        from vllm.config import CUDAGraphMode
+        from vllm.forward_context import get_forward_context, is_forward_context_available
+        if is_forward_context_available() and get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.FULL:
+            return None
+    except Exception:  # pragma: no cover - defensive
+        pass
+    return capture
+
+
+def _weak_capture_arg(arg):
+    try:
+        from vllm.compilation.breakable_cudagraph import _weak_ref_capture_arg
+        return _weak_ref_capture_arg(arg)
+    except Exception:  # pragma: no cover - defensive
+        return arg

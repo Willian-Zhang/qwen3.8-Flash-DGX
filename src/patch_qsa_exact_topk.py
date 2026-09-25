@@ -9,17 +9,44 @@ Default behaviour unchanged."""
 import sys
 F = sys.argv[1]
 src = open(F).read()
-CALL = "        topk_op(logits, visible_blocks, blocks, topk_workspace, block_topk, columns)\n"
-assert src.count(CALL) == 1, "topk call site not found exactly once"
-src = src.replace(CALL,
-    "        if _QSA_TOPK_MODE == \"1\":\n"
-    "            _qsa_exact_topk(logits, visible_blocks, blocks, block_topk, columns)\n"
-    "        elif _QSA_TOPK_MODE == \"fill\":\n"
-    "            _qsa_mask_invisible_(logits, visible_blocks, columns)\n"
-    "            topk_op(logits, visible_blocks, blocks, topk_workspace, block_topk, columns)\n"
-    "        else:\n"
-    "            topk_op(logits, visible_blocks, blocks, topk_workspace, block_topk, columns)\n")
-src = src.replace("import math\n", "import math\nimport os\n", 1)
+# v0.29 (ops/qsa.py, one chunked call site) and v0.30 (ops/qsa_indexer.py, the `_topk` helper
+# shared by the prefill and decode paths after vllm#54513) spell the call differently.
+CALL_V029 = "        topk_op(logits, visible_blocks, blocks, topk_workspace, block_topk, columns)\n"
+CALL_V030 = (
+    "    topk_op(\n"
+    "        logits,\n"
+    "        visible_blocks,\n"
+    "        block_indices,\n"
+    "        topk_workspace,\n"
+    "        block_topk,\n"
+    "        logits.shape[1],\n"
+    "    )\n"
+)
+if src.count(CALL_V029) == 1:
+    src = src.replace(CALL_V029,
+        "        if _QSA_TOPK_MODE == \"1\":\n"
+        "            _qsa_exact_topk(logits, visible_blocks, blocks, block_topk, columns)\n"
+        "        elif _QSA_TOPK_MODE == \"fill\":\n"
+        "            _qsa_mask_invisible_(logits, visible_blocks, columns)\n"
+        "            topk_op(logits, visible_blocks, blocks, topk_workspace, block_topk, columns)\n"
+        "        else:\n"
+        "            topk_op(logits, visible_blocks, blocks, topk_workspace, block_topk, columns)\n")
+    print("  exact top-k: v0.29 call site patched")
+elif src.count(CALL_V030) == 1:
+    src = src.replace(CALL_V030,
+        "    columns = logits.shape[1]\n"
+        "    if _QSA_TOPK_MODE == \"1\":\n"
+        "        _qsa_exact_topk(logits, visible_blocks, block_indices, block_topk, columns)\n"
+        "    elif _QSA_TOPK_MODE == \"fill\":\n"
+        "        _qsa_mask_invisible_(logits, visible_blocks, columns)\n"
+        "        topk_op(logits, visible_blocks, block_indices, topk_workspace, block_topk, columns)\n"
+        "    else:\n"
+        "        topk_op(logits, visible_blocks, block_indices, topk_workspace, block_topk, columns)\n")
+    print("  exact top-k: v0.30 call site patched")
+else:
+    raise SystemExit("topk call site not found exactly once (neither v0.29 nor v0.30 spelling)")
+if "\nimport os\n" not in src:
+    src = src.replace("import torch\n", "import os\nimport torch\n", 1)
 src += '''
 
 # --- GX10: QSA top-k variants (VLLM_QSA_EXACT_TOPK = 0 | 1 | fill), see vllm#51782 / qwen3.8-Flash-DGX#3 ---

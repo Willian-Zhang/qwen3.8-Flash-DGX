@@ -40,7 +40,7 @@ usage() { sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # A profile is a plain KEY=VALUE env file. Two comment lines carry metadata:
 #   # desc: one line shown by `flash profiles`
-#   # base: preview | v0.29   (which Dockerfile builds the image it expects)
+#   # base: preview | v0.29 | v0.30   (which Dockerfile builds the image it expects)
 profile_file() {
   local p="$1"
   [ -f "$PROFILES_DIR/$p.env" ] || die "unknown profile '$p' — see: ./flash profiles"
@@ -73,7 +73,9 @@ load_profile() {
   export MODEL="${MODEL:-$MODEL_DEFAULT}" HF_CACHE="${HF_CACHE:-$HOME/.cache/huggingface}"
   export GPU_MEM="${GPU_MEM:-0.80}" KV_DTYPE="${KV_DTYPE:-auto}"
   BASE_EXPECTED="$(profile_meta "$file" base)"; BASE_EXPECTED="${BASE_EXPECTED:-preview}"
-  if [ "$BASE_EXPECTED" = v0.29 ]; then
+  if [ "$BASE_EXPECTED" = v0.30 ]; then
+    export IMAGE="${IMAGE:-qwen38-flash-dgx:v0.30}"; DOCKERFILE="Dockerfile.v0.30"
+  elif [ "$BASE_EXPECTED" = v0.29 ]; then
     export IMAGE="${IMAGE:-qwen38-flash-dgx:v0.29}"; DOCKERFILE="Dockerfile.v0.29"
   else
     export IMAGE="${IMAGE:-qwen38-flash-dgx}"; DOCKERFILE="Dockerfile"
@@ -221,7 +223,7 @@ cmd_doctor() {
   if [ -n "${HF_TOKEN:-}${HUGGING_FACE_HUB_TOKEN:-}" ]; then ok "HF token in the environment"; else info "no HF_TOKEN: downloads work but the Hub may rate-limit; export HF_TOKEN=... to be safe"; fi
 
   step "profile sanity"
-  if [ "$BASE_EXPECTED" = v0.29 ] && [ "$KV_DTYPE" != auto ]; then fail "KV_DTYPE=$KV_DTYPE is not available on the v0.29 base (fp8 KV not ported) — use a preview-base profile"; fi
+  if { [ "$BASE_EXPECTED" = v0.29 ] || [ "$BASE_EXPECTED" = v0.30 ]; } && [ "$KV_DTYPE" != auto ]; then fail "KV_DTYPE=$KV_DTYPE is not available on the $BASE_EXPECTED base (fp8 KV not ported) — use a preview-base profile"; fi
   if [ "${YARN:-0}" = 0 ] && [ "${CTX:-262144}" -gt 262144 ]; then fail "CTX=$CTX above the native 262144 needs YARN=1"; fi
   if [ "$KV_DTYPE" = auto ] && [ "${CTX:-262144}" -gt 500000 ]; then warn "CTX=$CTX in bf16 KV: 500k is the validated ceiling (800k got OOM-killed on a long prefill); 1M needs KV_DTYPE=fp8_e4m3"; fi
   [ "$FAILURES" -eq 0 ] && [ "$WARNINGS" -eq 0 ] && ok "profile looks fine"

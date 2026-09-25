@@ -30,7 +30,7 @@ git clone https://github.com/blazux/qwen3.8-Flash-DGX.git && cd qwen3.8-Flash-DG
 ```
 
 Other recipes are one word away: `./flash profiles` lists them (`speed`, `context`, `context-1m`,
-`shared`, `published`, `native`, `v0.29`), `./flash serve speed` runs one, and any variable can still
+`shared`, `published`, `native`, `v0.29`, `v0.30`), `./flash serve speed` runs one, and any variable can still
 be overridden on the command line (`./flash serve default MTP=3 PORT=18301`). `./flash status`,
 `logs`, `stop`, `start`, `rm` do what they say. Details in [The `flash` command](#the-flash-command).
 
@@ -56,9 +56,11 @@ same or better quality, +15–22% KV, −8% single-stream decode — the whole s
 `MODEL=RadixArk/Qwen3.8-Flash-Next-NVFP4`, same recipe, same image. Want the checkpoint exactly as
 published? Drop `prepare-hybrid.sh` and `MODE=hybrid`. Want speed over the last percent of
 quality? `MTP=3`, and `MODE=hybrid-mtp` for more KV — both explained in the [options table](#how-the-defaults-are-chosen-quality-first-speed-as-an-option).
-Prefer the current vLLM release to the preview image? `docker build -f Dockerfile.v0.29 -t qwen38-flash-dgx:v0.29 .`
-and `IMAGE=qwen38-flash-dgx:v0.29` — same recipe, same defaults, measured at parity
-(see [vLLM v0.29.0 as the base image](#vllm-v0290-as-the-base-image-dockerfilev029)).
+Prefer the current vLLM release to the preview image? `./flash serve v0.30` (or by hand
+`docker build -f Dockerfile.v0.30 -t qwen38-flash-dgx:v0.30 .` and `IMAGE=qwen38-flash-dgx:v0.30`) —
+same recipe, same defaults, quality at parity and prefill up to 2× faster; it is what our own box runs
+since 2026-09-25 (see [vLLM v0.30.0 as the base image](#vllm-v0300-as-the-base-image-dockerfilev030)).
+`Dockerfile.v0.29` stays available ([vLLM v0.29.0](#vllm-v0290-as-the-base-image-dockerfilev029)).
 Everything below is the long version: what was broken on GB10, what was fixed, and the numbers.
 
 > **Independently reproduced** on a DGX Spark by
@@ -127,6 +129,22 @@ cases over three chunk sizes: 21 fail and 9 pass on patch 12 alone, all 30 pass 
 patch 13. The 9 that pass either way are the no-regression guards — a real call
 still parses, a real call after a closed fence still parses, and patch 12's own
 inline-quoted-marker case is unchanged.
+
+## Update 2026-09-25 — vLLM v0.30.0 base, faster boots
+
+- **`Dockerfile.v0.30`**: the recipe on the vLLM v0.30.0 release (profile `v0.30`). Same weights, same
+  defaults. On our GX10 against the v0.29 setup that ran production: tournament 87.8% (3 runs) vs 88.8%
+  (5 runs), no detectable difference; cold prefill 1.5–2× faster, the 413k-token needle in 121 s instead
+  of 148 s, same decode. It is our production image now. Details in
+  [vLLM v0.30.0 as the base image](#vllm-v0300-as-the-base-image-dockerfilev030); thanks to
+  [@ChengYen-Tang](https://github.com/ChengYen-Tang) for the nudge in [#14](https://github.com/blazux/qwen3.8-Flash-DGX/issues/14).
+- **Patch 14, faster weight loading** ([#33](https://github.com/blazux/qwen3.8-Flash-DGX/pull/33) by
+  [@Willian-Zhang](https://github.com/Willian-Zhang)): on all three bases. Main-model loading went from
+  452 s to 242 s on our box (v0.29 image) and 231 s on v0.30, with byte-identical first-token
+  log-probs. A full boot is now about 6–8 minutes instead of 11.
+- **Determinism is sequential** ([#32](https://github.com/blazux/qwen3.8-Flash-DGX/issues/32)): the
+  same request repeated one at a time is byte-identical; concurrent requests are not batch-invariant,
+  a vLLM limit for GDN models. Scope added to [Deterministic top-k](#deterministic-top-k-det_topk1-default).
 
 ## Update 2026-09-14 — NVIDIA's checkpoint is the default
 
@@ -323,7 +341,7 @@ prefix-caching work; nothing here is extrapolated.
 | Prefix-cache hit, TTFT on a 20k-token prefix | n/a | **~1.4 s** (vs ~14 s cold) | same |
 | Context | 262k | **262k native, 500k with YaRN** | same |
 | KV cache @0.80 (500k YaRN, MTP) | — | ~580k tokens | ~630k tokens |
-| Deterministic at temperature 0 | yes | **yes** (`DET_TOPK=1`) | **yes** |
+| Deterministic at temperature 0 (sequential requests) | yes | **yes** (`DET_TOPK=1`) | **yes** |
 
 *Measured on an ASUS GX10 (GB10, 128 GB), single request, real prompts, greedy. Quality
 (a 17-scenario agentic tournament, 3 repeats) is identical across NVFP4 and hybrid:
@@ -566,6 +584,16 @@ recomputed — expect the benefit to start around a couple of thousand tokens.
 
 ## Deterministic top-k (`DET_TOPK=1`, default)
 
+**Scope.** "Deterministic" here means: the same request, repeated one at a time, gives
+byte-identical greedy output. It does **not** mean batch invariance: the same request served
+concurrently with others lands in batches of different shapes, the kernels reduce in a
+different order, and greedy output can diverge. That is a vLLM property for GDN-hybrid
+models, not something this recipe causes or can fix — vLLM's `VLLM_BATCH_INVARIANT=1` does
+not support GDN attention yet ([vllm#42960](https://github.com/vllm-project/vllm/issues/42960),
+[vllm#48613](https://github.com/vllm-project/vllm/issues/48613)). Measured and documented by
+[@aipiJuancho](https://github.com/aipiJuancho) in
+[issue #32](https://github.com/blazux/qwen3.8-Flash-DGX/issues/32).
+
 The sparse attention (QSA) picks the top-k key blocks per query with a `persistent_topk`
 kernel. On GB10 that kernel is **non-deterministic** — identical greedy requests produce
 different outputs 2 times out of 4 — and can drop legitimate candidates
@@ -712,6 +740,48 @@ first rows are equivalent in quality; the last one shows why MTP=3 stays an opti
 `bench` numbers for the default: decode 36.6 tok/s, prefill 2,473 tok/s at 8k / 3,004 at 32k,
 needle 92k in 45.5 s, 4/4 deterministic. The KV pool loses the 320 MiB slice plus the
 full-width logits buffer the patch rebuilds per draft step (about 60k tokens at `GPU_MEM=0.80`).
+
+## vLLM v0.30.0 as the base image (`Dockerfile.v0.30`)
+
+vLLM **v0.30.0** brings Qwen3.8-Flash-Next work of its own: separate prefill and decode QSA
+indexer kernels (vllm#54513), fused PLE kernels (vllm#54517) and an FP8 indexer cache (vllm#54890).
+It also moved enough code that half of our patches had to be re-targeted:
+
+```bash
+./flash serve v0.30                     # builds Dockerfile.v0.30 on first use
+# or by hand
+docker build -f Dockerfile.v0.30 -t qwen38-flash-dgx:v0.30 .
+IMAGE=qwen38-flash-dgx:v0.30 MODE=hybrid YARN=1 CTX=500000 scripts/serve.sh
+```
+
+| patch | v0.29 base | v0.30 base |
+|---|---|---|
+| 1 PLE mmap | swaps `PLEVocabParallelEmbedding` | re-targeted: the n-gram module moved to `ngram_embedding.py`, the hashing became a Triton kernel and the lookup goes through `Qwen4ExpPLEDeviceEmbedding`; `apply()` detects the layout |
+| 1, CUDA graphs | our gather is a splitting op | v0.30 captures this model with **breakable CUDA graphs** (torch.compile off, no FX splitting), so the gather breaks the capture itself, writes into a static per-layer buffer, and does not read the not-yet-computed ids at capture time |
+| 5 exact top-k, 8 deterministic kernel | `ops/qsa.py` | re-targeted to the shared `_topk` of `ops/qsa_indexer.py`; the kernel wiring is `src/patch_qsadet.py` (covers both layouts) |
+| 11 block-FP8 MTP experts | vllm#55513 backport | **in the release, dropped** |
+| 12, 13 Qwen tool-marker fixes | `src/patches/*.patch` | same fixes rebased on the new parser engine (`src/patches/*-v030.patch`), same 30-case test module |
+| 2, 4, 6, 10, 14 | as is | unchanged |
+| 7 fp8 KV cache | not ported | not ported (`KV_DTYPE` must stay `auto`) |
+
+Measured on our GX10, NVIDIA checkpoint, hybrid, YaRN 500k, MTP=2, head-to-head with the v0.29 image
+that ran production:
+
+| | v0.29 base (production until 2026-09-25) | v0.30 base |
+|---|---|---|
+| Tournament, 55 scenarios, temperature 0.2 | 88.8% ± 1.0 (5 runs) | **87.8% ± 0.5 (3 runs)** — difference not detectable (paired bootstrap CI [−1.1, +3.5] points, p = 0.18) |
+| Losses that are not reasoning runaways | `v3` partial (1 run), `g31` 25/26 cells | same two |
+| Runaways on the coding tasks | 66% | 63% |
+| Decode, single stream (median of 6, cold / warm) | 33.2 / 34.5 tok/s | 34.0 / 34.3 tok/s |
+| Prefill, cold table region, 8k / 32k | 1,597 / 2,823 tok/s | **2,689 / 4,002 tok/s** |
+| Needles at 185k / 323k / 413k tokens | found in 100 / 131 / 148 s | **found in 68 / 120 / 121 s** |
+| MTP acceptance after probes | 66.2% | 74.0% |
+| KV pool @0.80 | 679k tokens | 641k–692k tokens (two boots) |
+| Deterministic at temperature 0 (sequential) | 2/2 | 2/2 |
+
+Greedy outputs are not token-identical across the two bases (new kernels, new NVFP4 W4A4 default on
+sm_121): on our five reference prompts three came out identical and two diverged at low-confidence
+tokens, both answers correct. That is why the comparison is a tournament, not a diff.
 
 ## vLLM v0.29.0 as the base image (`Dockerfile.v0.29`)
 
@@ -1079,15 +1149,17 @@ Details: [results-radixark-vllm.md](https://github.com/jschmied/qwen38-flash-nex
 
 ```
 flash                             one-command front-end: doctor / setup / serve <profile> / wait / test / status …
-profiles/*.env                    named recipes for it (default, speed, context, context-1m, shared, published, native, v0.29)
+profiles/*.env                    named recipes for it (default, speed, context, context-1m, shared, published, native, v0.29, v0.30)
 Dockerfile                        official vLLM Flash-Next preview image + the patches below (default)
 Dockerfile.v0.29                  same recipe on the vLLM v0.29.0 release (patches 3 and 9 dropped, 7 not ported, 11 is the vllm#55513 backport)
+Dockerfile.v0.30                  same recipe on the vLLM v0.30.0 release (3, 9, 11 in the release; 12/13 rebased; our production image)
 src/vllm_ple_mmap.py              1. mmap PLE table (opaque splitting op)            VLLM_PLE_MMAP=1
                                      handles both layouts (preview forward_impl hook / v0.29 embedding swap)
 src/mamba_utils_guarded.py        3. vllm#50729 + bounds guard (drop-in mamba_utils.py)
 src/patch_mamba_block_size.py     4. prefix-caching block_size fix
 src/patch_qsa_exact_topk.py       5. exact, deterministic QSA top-k                  VLLM_QSA_EXACT_TOPK=1
 (Dockerfile patch 8)              8. deterministic persistent_topk kernel, built at docker build  VLLM_QSA_DET_TOPK=1
+src/patch_qsadet.py                  wires that kernel into the QSA indexer (v0.29 and v0.30 layouts)
                                      from @jschmied's repo (pinned commit) — vllm#55122
 (Dockerfile patch 9)              9. M%4 padding for the blockwise-fp8 GEMM (@jschmied,      VLLM_FP8_PAD_M4=1
                                      pinned commit) — hybrid mode with prefix caching off
@@ -1102,6 +1174,7 @@ src/vllm_modelopt_block_moe.py   11. FP8_BLOCK_SCALES layers in ModelOpt mixed c
 src/patch_qsa_fp8_kv.py           7. fp8_e4m3 KV cache on the QSA path (by @Nanetnounou) --kv-cache-dtype fp8_e4m3
 src/patch_moe_load_clone.py      14. clone mmap-backed expert weights before the H2D copy          VLLM_LOAD_CLONE=0 disables
                                      (main weight load 541 -> 150 s on a Spark; docs/HOW-IT-WORKS.md)
+src/patches/*-v030.patch          patches 12 and 13 rebased on the v0.30 parser engine
 src/test_ple_mmap_cpu.py          CPU unit test for the gather (no GPU needed)
 src/test_qsa_exact_topk_cpu.py    CPU unit test for the exact top-k (no GPU needed)
 src/test_block_fp8_mtp_cpu.py     CPU unit test for the vllm#55513 backport (no GPU needed; v0.29 image)
