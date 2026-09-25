@@ -1180,11 +1180,13 @@ src/patch_load_pread.py          15. pread checkpoint tensors <= 64 MiB instead 
 src/patch_moe_name_index.py      16. indexed FusedMoE expert-name matching (~30 s of Python)        VLLM_MOE_NAME_INDEX=0 disables
 src/patch_embed_chunked_copy.py  17. embed_tokens / lm_head copied to the GPU in 64 MiB pieces     VLLM_LOAD_EMBED_CHUNK=0 disables
                                      15-17 together: weight load 150 + 32 s -> 35 + 12 s (docs/load-time-investigation.md)
+src/patch_mtp_name_prefilter.py  18. MTP drafter skips non-MTP tensors before reading (12 -> 1.2 s) VLLM_MTP_NAME_PREFILTER=0 disables
 src/test_ple_mmap_cpu.py          CPU unit test for the gather (no GPU needed)
 src/test_qsa_exact_topk_cpu.py    CPU unit test for the exact top-k (no GPU needed)
 src/test_block_fp8_mtp_cpu.py     CPU unit test for the vllm#55513 backport (no GPU needed; v0.29 image)
 src/test_moe_name_index_cpu.py    CPU unit test: patch 16 visits exactly the entries of the original loop
 src/test_load_patches_cpu.py      CPU check of patches 15 and 17 against real checkpoint files
+src/test_mtp_prefilter_cpu.py     CPU check of patch 18: the drafter's exact tensor set, on a real snapshot
 tools/fp8_convert.py              side-layer bf16 -> blockwise fp8 (by @Saren-Arterius)
 tools/bench_moe_load.py           per-expert H2D copy micro-benchmark behind patch 14 (needs a free GPU)
 tools/profile_boot.sh             py-spy every process of a boot in 10 s slices (needs SYS_PTRACE, see header)

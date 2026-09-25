@@ -21,6 +21,7 @@
 #  15. pread small checkpoint tensors, not mmap     (VLLM_LOAD_PREAD=0 disables; needs 14)
 #  16. Indexed FusedMoE expert-name matching        (VLLM_MOE_NAME_INDEX=0 disables)
 #  17. Embeddings copied to the GPU in 64 MiB pieces (VLLM_LOAD_EMBED_CHUNK=0 disables)
+#  18. MTP drafter skips non-MTP tensors unread      (VLLM_MTP_NAME_PREFILTER=0 disables)
 #
 #   docker build -t qwen38-flash-dgx .
 #
@@ -192,3 +193,7 @@ COPY src/patch_load_pread.py src/patch_moe_name_index.py src/patch_embed_chunked
 RUN python3 /tmp/patch_load_pread.py ${SP} && python3 /tmp/patch_moe_name_index.py ${SP} \
  && python3 /tmp/patch_embed_chunked_copy.py ${SP} \
  && rm /tmp/patch_load_pread.py /tmp/patch_moe_name_index.py /tmp/patch_embed_chunked_copy.py
+# 18: the drafter's load keeps ~3,100 of 299,845 checkpoint tensors; skip the rest by name before
+#     they are read, through vLLM's own should_skip_weight hook.
+COPY src/patch_mtp_name_prefilter.py /tmp/patch_mtp_name_prefilter.py
+RUN python3 /tmp/patch_mtp_name_prefilter.py ${SP} && rm /tmp/patch_mtp_name_prefilter.py
