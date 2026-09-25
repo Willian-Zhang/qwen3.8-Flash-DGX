@@ -338,6 +338,11 @@ Preview `Dockerfile` only (not `Dockerfile.v0.29`, not in the upstream PR yet).
   it would drop), and a missing tensor would collapse acceptance, not move it by one token. The
   cross-boot repeatability of the drafter was never measured, so the 2-token difference is not
   attributed yet; an A/B boot with `VLLM_MTP_NAME_PREFILTER=0` on the same image would settle it.
+- **A/B boot 09-25 11:01** (same image, `DOCKER_EXTRA="-e VLLM_MTP_NAME_PREFILTER=0"`, removed
+  afterwards): drafter **1,208 / 864**, identical to the prefilter-on boot; greedy texts and
+  logprobs identical. So patch 18 does not change the drafter; the 1,210 / 863 of the patch 14–17
+  boot is a between-boots difference (likely the drafter's compiled graph, rebuilt once when
+  patch 18 changed `mtp.py`; not verified). MTP load with the prefilter off: 7.0 s, on: 1.2 s.
 - Rollback image: `qwen38-flash-dgx:pre-patch18` (patches 14–17).
 
 The new timeline: container start → EngineCore init 23 s, model construction + prewarm start 6 s,
