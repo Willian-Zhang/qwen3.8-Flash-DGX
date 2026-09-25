@@ -179,21 +179,26 @@ cmd_doctor() {
   else warn "nvidia-smi not found on the host (docker --gpus may still work)"; fi
 
   step "docker"
+  local docker_ok=0
   if ! command -v docker >/dev/null 2>&1; then fail "docker not installed"; else
-    if docker info >/dev/null 2>&1; then ok "docker daemon reachable ($(docker version --format '{{.Server.Version}}' 2>/dev/null))"; else fail "docker daemon not reachable (is your user in the docker group?)"; fi
+    if docker info >/dev/null 2>&1; then docker_ok=1; ok "docker daemon reachable ($(docker version --format '{{.Server.Version}}' 2>/dev/null))"; else fail "docker daemon not reachable (is your user in the docker group?)"; fi
     if docker info --format '{{range $k,$v := .Runtimes}}{{$k}} {{end}}' 2>/dev/null | grep -q nvidia \
        || command -v nvidia-container-runtime >/dev/null 2>&1 || command -v nvidia-ctk >/dev/null 2>&1 \
        || ls /etc/cdi/*nvidia* /var/run/cdi/*nvidia* >/dev/null 2>&1; then ok "NVIDIA container toolkit present (docker --gpus all)"
     else warn "no NVIDIA container toolkit found (no nvidia runtime, nvidia-ctk or CDI spec) — install nvidia-container-toolkit if 'docker run --gpus all' fails"; fi
-    local others; others="$(docker ps --format '{{.Names}} ({{.Image}})' | grep -v "^$NAME " || true)"
-    if [ -n "$others" ]; then warn "other containers running — one big model at a time on this box:"; echo "$others" | sed 's/^/      /'; else ok "no other container running"; fi
+    if [ "$docker_ok" = 1 ]; then
+      local others; others="$(docker ps --format '{{.Names}} ({{.Image}})' | grep -v "^$NAME " || true)"
+      if [ -n "$others" ]; then warn "other containers running — one big model at a time on this box:"; echo "$others" | sed 's/^/      /'; else ok "no other container running"; fi
+    else warn "running containers not checked: no docker access"; fi
   fi
   if port_in_use "$PORT"; then
-    if [ "$(container_state)" = running ]; then info "port $PORT is held by $NAME itself (already serving)"; else fail "port $PORT already in use by something else — pick another: PORT=18301"; fi
+    if [ "$docker_ok" != 1 ]; then warn "port $PORT is in use; without docker access doctor cannot tell whether $NAME holds it"
+    elif [ "$(container_state)" = running ]; then info "port $PORT is held by $NAME itself (already serving)"; else fail "port $PORT already in use by something else — pick another: PORT=18301"; fi
   else ok "port $PORT free"; fi
 
   step "image"
-  if have_image; then
+  if [ "$docker_ok" != 1 ]; then warn "$IMAGE not checked: no docker access"
+  elif have_image; then
     local b; b="$(image_base)"
     if [ -n "$b" ] && [ "$b" != "$BASE_EXPECTED" ]; then warn "$IMAGE is built from the '$b' base but profile '$profile' expects '$BASE_EXPECTED' — rebuild: ./flash setup $profile"; else ok "$IMAGE present (base: ${b:-unlabeled, pre-2026-09-11 build})"; fi
   else info "$IMAGE not built yet — ./flash setup $profile will (about 1 min on the preview base, plus the pull)"; fi
@@ -203,7 +208,7 @@ cmd_doctor() {
   if [ -d "$HF_CACHE" ] && [ ! -w "$HF_CACHE" ]; then warn "$HF_CACHE is not writable by you (owner: $(stat -c %U "$HF_CACHE" 2>/dev/null)), typically a cache first created by a manual 'docker run -v'. Downloads still work (the container runs as root); serve.sh keeps its chat-template copy elsewhere. To own it: sudo chown -R \$USER $HF_CACHE"; fi
   local free; free="$(gib_free_at "$HF_CACHE")"
   if have_weights; then ok "checkpoint present: $(snapshot_dir)"; else
-    local sdir miss; sdir="$(snapshot_dir)"; miss="$( [ -n "$sdir" ] && missing_files "$sdir" shards )"
+    local sdir miss; sdir="$(snapshot_dir)"; miss="$( [ -z "$sdir" ] || missing_files "$sdir" shards )"
     if [ -n "$miss" ]; then warn "checkpoint INCOMPLETE, missing or dangling: $miss — re-run scripts/download-weights.sh (resumable), and prepare-hybrid.sh only after that"; else info "checkpoint not downloaded yet (126 GiB)"; fi
     if [ "${free:-0}" -ge 140 ]; then ok "${free} GB free on that filesystem (140 needed)"; else fail "${free:-?} GB free on that filesystem, 140 needed for the download"; fi
   fi
