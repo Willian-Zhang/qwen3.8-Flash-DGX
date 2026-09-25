@@ -6,7 +6,7 @@
 # "KV cache is needed, larger than available" race after another big container
 # was stopped. Tunables live in systemd/qwen38-flash.env (same vars as serve.sh).
 #
-#   sudo systemctl start|stop|restart qwen38-flash
+#   systemctl start|stop|restart qwen38-flash   # no sudo needed: install.sh adds a polkit rule
 #   journalctl -u qwen38-flash -f          # same stream as docker logs -f qwen38-flash
 
 [Unit]
