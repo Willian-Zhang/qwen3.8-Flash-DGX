@@ -25,7 +25,7 @@ git clone https://github.com/blazux/qwen3.8-Flash-DGX.git && cd qwen3.8-Flash-DG
 ./flash doctor      # docker, GPU, memory, disk, port, image, weights: tells you what is missing
 ./flash setup       # builds the image, downloads the checkpoint (NVIDIA's NVFP4, 124 GiB via Xet, resumable), prepares the hybrid layout
 ./flash serve       # the recommended recipe (profile "default"): hybrid, 500k context, deterministic
-./flash wait        # first boot loads ~75 GiB of weights, 8-13 min; prints the KV pool when the API is up
+./flash wait        # first boot loads ~75 GiB of weights, ~3-4 min (patches 14-18); prints the KV pool when the API is up
 ./flash test        # health, coherence, prefix-cache hit, determinism, tok/s
 ```
 
@@ -40,7 +40,7 @@ The same thing by hand, unchanged and still supported (everything `flash` does i
 docker build -t qwen38-flash-dgx .            # ~1 min: official vLLM image + the 12 patches below
 scripts/download-weights.sh                   # nvidia/Qwen3.8-Flash-Next-NVFP4, ~124 GiB via Xet, resumable (one-time)
 scripts/prepare-hybrid.sh                     # recommended: fp8 side layers, +20% decode, same quality (~10 min, one-time)
-MODE=hybrid YARN=1 CTX=500000 scripts/serve.sh   # the recipe our own box runs; 500k context, ~13 min to load
+MODE=hybrid YARN=1 CTX=500000 scripts/serve.sh   # the recipe our own box runs; 500k context, ~3-4 min to load
 docker logs -f qwen38-flash                   # ready at "Application startup complete"
 scripts/smoke-test.sh                         # health, coherence, prefix-cache hit, determinism, tok/s
 ```
@@ -48,8 +48,8 @@ scripts/smoke-test.sh                         # health, coherence, prefix-cache 
 OpenAI-compatible API on `http://localhost:18300/v1`, model name `qwen3.8-flash-next`,
 tool calling and reasoning parsers on. Every default is the setting that scored best on our
 agentic tournament (see [How the defaults are chosen](#how-the-defaults-are-chosen-quality-first-speed-as-an-option));
-what you get on a GX10: ~34 tok/s single-stream decode, ~2,500–2,800 tok/s prefill, a ~680k-token
-KV pool, prefix caching, deterministic greedy output, 500k tokens of context. The checkpoint is
+what you get on a GX10: ~34 tok/s single-stream decode, ~2,500–2,800 tok/s prefill, a ~520–640k-token
+KV pool (larger numbers seen before 2026-09-25 were partly swap, see [#34](https://github.com/blazux/qwen3.8-Flash-DGX/pull/34)), prefix caching, deterministic greedy output, 500k tokens of context. The checkpoint is
 **NVIDIA's own NVFP4 quantization** since 2026-09-14 (it replaced RadixArk's after a 5-pass head-to-head:
 same or better quality, +15–22% KV, −8% single-stream decode — the whole story is in
 [Checkpoints](#checkpoints-nvidias-nvfp4-default-and-radixarks)); RadixArk's is one variable away,
@@ -132,7 +132,7 @@ patch 13. The 9 that pass either way are the no-regression guards — a real cal
 still parses, a real call after a closed fence still parses, and patch 12's own
 inline-quoted-marker case is unchanged.
 
-## Update 2026-09-25 — vLLM v0.30.0 base, faster boots
+## Update 2026-09-25 — vLLM v0.30.0 base, 3-minute boots
 
 - **`Dockerfile.v0.30`**: the recipe on the vLLM v0.30.0 release (profile `v0.30`). Same weights, same
   defaults. On our GX10 against the v0.29 setup that ran production: tournament 87.8% (3 runs) vs 88.8%
@@ -143,7 +143,18 @@ inline-quoted-marker case is unchanged.
 - **Patch 14, faster weight loading** ([#33](https://github.com/blazux/qwen3.8-Flash-DGX/pull/33) by
   [@Willian-Zhang](https://github.com/Willian-Zhang)): on all three bases. Main-model loading went from
   452 s to 242 s on our box (v0.29 image) and 231 s on v0.30, with byte-identical first-token
-  log-probs. A full boot is now about 6–8 minutes instead of 11.
+  log-probs.
+- **Patches 15–18, the rest of weight loading** ([#34](https://github.com/blazux/qwen3.8-Flash-DGX/pull/34), also by
+  @Willian-Zhang): `pread` for small tensors, an index for expert names, chunked embedding copies,
+  and an MTP drafter that skips non-MTP tensors before reading them. On our box, v0.30 image: main
+  load 245 → 114 s, drafter 40 → 1.3 s, **boot 6 min 30 → 3 min 35**; first-token log-probs 5/5
+  identical to the image without them, same decode speed. Each has its own switch
+  (`VLLM_LOAD_PREAD`, `VLLM_MOE_NAME_INDEX`, `VLLM_LOAD_EMBED_CHUNK`, `VLLM_MTP_NAME_PREFILTER`).
+- **The KV pool reads smaller, and that is the real number.** On GB10 vLLM sizes the pool from
+  free *host* memory. A slow load pushed some of vLLM's own memory to swap before the profile, and
+  that memory was counted as free: our 714k-token boot had 1.6 GiB of vLLM swapped out. With the
+  fast load nothing is swapped and the same recipe gets ~520k (v0.30) to ~630k (preview) tokens.
+  For a pool that does not move between boots, set `KV_CACHE_MEM`.
 - **Determinism is sequential** ([#32](https://github.com/blazux/qwen3.8-Flash-DGX/issues/32)): the
   same request repeated one at a time is byte-identical; concurrent requests are not batch-invariant,
   a vLLM limit for GDN models. Scope added to [Deterministic top-k](#deterministic-top-k-det_topk1-default).
@@ -787,7 +798,7 @@ that ran production:
 | Prefill, cold table region, 8k / 32k | 1,597 / 2,823 tok/s | **2,689 / 4,002 tok/s** |
 | Needles at 185k / 323k / 413k tokens | found in 100 / 131 / 148 s | **found in 68 / 120 / 121 s** |
 | MTP acceptance after probes | 66.2% | 74.0% |
-| KV pool @0.80 | 679k tokens | 641k–692k tokens (two boots) |
+| KV pool @0.80 | 679k tokens | 641k–714k tokens with patch 14 only; **518k** with patches 15–18, no swap at profiling (see below) |
 | Deterministic at temperature 0 (sequential) | 2/2 | 2/2 |
 
 Greedy outputs are not token-identical across the two bases (new kernels, new NVFP4 W4A4 default on

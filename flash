@@ -9,7 +9,7 @@
 #   ./flash doctor                  check docker, GPU, memory, disk, ports, image, weights
 #   ./flash setup [profile]         build the image, download the weights, prepare the checkpoint (idempotent)
 #   ./flash serve [profile] [K=V..] start the server (K=V overrides any serve.sh variable)
-#   ./flash wait                    block until the API answers (first boot: ~8-13 min)
+#   ./flash wait                    block until the API answers (first boot: ~3-4 min)
 #   ./flash test                    scripts/smoke-test.sh against the running server
 #   ./flash status | logs | stop | start | rm
 #   ./flash profiles                list the profiles and what they are for
@@ -292,7 +292,7 @@ cmd_wait() {
   load_defaults_only
   local t0 deadline last="" state
   t0=$(date +%s); deadline=$((t0 + ${TIMEOUT:-1800}))
-  echo "waiting for $NAME on :$PORT (first boot loads ~75 GiB: 8-13 min; ctrl-c is safe, the server keeps loading)"
+  echo "waiting for $NAME on :$PORT (first boot loads ~75 GiB: ~3-4 min; ctrl-c is safe, the server keeps loading)"
   while :; do
     state="$(container_state)"
     case "$state" in
@@ -353,7 +353,7 @@ main() {
     profiles) cmd_profiles ;;
     test)     load_defaults_only; exec "$HERE/scripts/smoke-test.sh" "localhost:$PORT" ;;
     logs)     load_defaults_only; exec docker logs -f --tail "${1:-100}" "$NAME" ;;
-    stop)     load_defaults_only; docker stop -t 30 "$NAME" && echo "$NAME stopped (kept; ./flash start reloads the same recipe, ~8-13 min)" ;;
+    stop)     load_defaults_only; docker stop -t 30 "$NAME" && echo "$NAME stopped (kept; ./flash start reloads the same recipe, ~3-4 min)" ;;
     start)    load_defaults_only; docker start "$NAME" >/dev/null && echo "$NAME starting — ./flash wait" ;;
     rm|down)  load_defaults_only; docker rm -f "$NAME" >/dev/null 2>&1 && echo "$NAME removed" || echo "no container $NAME" ;;
     help|-h|--help) usage ;;
