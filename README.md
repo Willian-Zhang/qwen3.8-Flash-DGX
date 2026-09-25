@@ -492,7 +492,7 @@ Run it as a systemd service instead (starts on boot, restarts on crash, `journal
 
 ```bash
 $EDITOR systemd/qwen38-flash.env         # same vars as serve.sh
-systemd/install.sh && sudo systemctl start qwen38-flash
+systemd/install.sh && systemctl start qwen38-flash   # install.sh adds a polkit rule: no sudo for start/stop/restart
 ```
 
 ## Two checkpoint modes: NVFP4 or hybrid
