@@ -56,10 +56,12 @@ same or better quality, +15–22% KV, −8% single-stream decode — the whole s
 `MODEL=RadixArk/Qwen3.8-Flash-Next-NVFP4`, same recipe, same image. Want the checkpoint exactly as
 published? Drop `prepare-hybrid.sh` and `MODE=hybrid`. Want speed over the last percent of
 quality? `MTP=3`, and `MODE=hybrid-mtp` for more KV — both explained in the [options table](#how-the-defaults-are-chosen-quality-first-speed-as-an-option).
-Prefer the current vLLM release to the preview image? `./flash serve v0.30` (or by hand
-`docker build -f Dockerfile.v0.30 -t qwen38-flash-dgx:v0.30 .` and `IMAGE=qwen38-flash-dgx:v0.30`) —
-same recipe, same defaults, quality at parity and prefill up to 2× faster; it is what our own box runs
-since 2026-09-25 (see [vLLM v0.30.0 as the base image](#vllm-v0300-as-the-base-image-dockerfilev030)).
+Prefer the current vLLM release to the preview image? `./flash setup v0.30` then `./flash serve v0.30`
+(by hand: `docker build -f Dockerfile.v0.30 -t qwen38-flash-dgx:v0.30 .`, then run `scripts/serve.sh` with
+`IMAGE=qwen38-flash-dgx:v0.30` in the environment, no need to edit it) — same recipe, same defaults,
+quality at parity and prefill up to 2× faster; it is what our own box runs since 2026-09-25 (see
+[vLLM v0.30.0 as the base image](#vllm-v0300-as-the-base-image-dockerfilev030)). It is not the default
+yet: plain `./flash serve` and `scripts/serve.sh` still use the preview image until the switch.
 `Dockerfile.v0.29` stays available ([vLLM v0.29.0](#vllm-v0290-as-the-base-image-dockerfilev029)).
 Everything below is the long version: what was broken on GB10, what was fixed, and the numbers.
 
@@ -748,7 +750,8 @@ indexer kernels (vllm#54513), fused PLE kernels (vllm#54517) and an FP8 indexer 
 It also moved enough code that half of our patches had to be re-targeted:
 
 ```bash
-./flash serve v0.30                     # builds Dockerfile.v0.30 on first use
+./flash setup v0.30                     # builds Dockerfile.v0.30 (and checks weights, hybrid layout)
+./flash serve v0.30
 # or by hand
 docker build -f Dockerfile.v0.30 -t qwen38-flash-dgx:v0.30 .
 IMAGE=qwen38-flash-dgx:v0.30 MODE=hybrid YARN=1 CTX=500000 scripts/serve.sh
