@@ -3,7 +3,8 @@
 # paths in ops/qsa_indexer.py after vllm#54513):
 #   1 PLE mmap, 2 GB10 FLA fixes, 4 prefix-caching block_size fix, 5 exact top-k, 6 hybrid mode,
 #   8 deterministic top-k kernel, 10 reduced draft vocabulary, 12 Qwen tool preamble fix,
-#   13 quoted Qwen tool markers stay text, 14 MoE weight-load clone (#33).
+#   13 quoted Qwen tool markers stay text, 14 MoE weight-load clone (#33), 15-18 the rest of weight
+#   loading (pread, expert-name index, chunked embedding copy, MTP name prefilter).
 # Not needed here: 3 (vllm#50729), 9 (vllm#52775) and 11 (vllm#55513) are in the release. Not ported yet:
 # 7 (fp8 KV cache). 12 and 13 are the same fixes as on v0.29, rebased (src/patches/*-v030.patch).
 #
@@ -90,3 +91,16 @@ RUN cd ${SP} && patch --batch --forward --fuzz=0 -p1 < /tmp/qwen-tool-marker-gua
 # PR #33 (@Willian-Zhang): same two call sites in v0.30's routed_experts.py; byte-identical weights.
 COPY src/patch_moe_load_clone.py /tmp/patch_moe_load_clone.py
 RUN python3 /tmp/patch_moe_load_clone.py ${SP} && rm /tmp/patch_moe_load_clone.py
+
+# --- 15-18. The rest of weight loading (docs/HOW-IT-WORKS.md, "The rest of weight loading") ---
+# Same scripts as on the preview base; v0.30 has the same call sites (18 handles the qwen4_exp rename).
+# 15: pread tensors <= 64 MiB into ordinary memory, not mmap views; never the PLE table (needs 14).
+# 16: indexed expert-name matching instead of substring-testing 1,536 entries per tensor.
+# 17: embed_tokens / lm_head copied to the GPU in 64 MiB pieces via ordinary memory.
+# 18: the MTP drafter skips non-MTP tensors by name before they are read.
+COPY src/patch_load_pread.py src/patch_moe_name_index.py src/patch_embed_chunked_copy.py \
+     src/patch_mtp_name_prefilter.py /tmp/
+RUN python3 /tmp/patch_load_pread.py ${SP} && python3 /tmp/patch_moe_name_index.py ${SP} \
+ && python3 /tmp/patch_embed_chunked_copy.py ${SP} && python3 /tmp/patch_mtp_name_prefilter.py ${SP} \
+ && rm /tmp/patch_load_pread.py /tmp/patch_moe_name_index.py /tmp/patch_embed_chunked_copy.py \
+       /tmp/patch_mtp_name_prefilter.py

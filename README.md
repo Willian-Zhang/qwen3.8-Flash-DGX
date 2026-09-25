@@ -693,22 +693,30 @@ cache warm, only the Triton volume emptied — and came out at 37.2 s against bo
 0.2 s difference, an order of magnitude below the capture noise. The five warnings appear in every
 boot either way, warm or cold. Mounting it would have been cargo cult.
 
-## Faster weight loading (patch 14, default on)
+## Faster weight loading (patches 14–18, default on)
 
 Most of a boot used to be "Loading weights", and the cause was not the disk. vLLM copies each of
 the ~149k routed-expert tensors to the GPU on its own, straight from the memory-mapped checkpoint.
 On GB10 that copy costs ~1.7 ms per 800 KiB tensor when the source is a file-backed page, and
 ~0.23 ms from ordinary memory. Patch 14 clones each tensor before the copy, which produces the
 same bytes and uses one transient tensor of scratch memory. With the compile cache reused as
-above, the whole startup drops from ~11 min to 4 min 32 s:
+above, it takes startup from ~11 min to 4 min 32 s. Patches 15–18 remove most of the rest: small
+tensors are read with `pread` instead of mmap (never the PLE table), expert names are matched by
+index, `embed_tokens` / `lm_head` are copied in 64 MiB pieces, and the MTP drafter skips the
+tensors it doesn't need before reading them. Startup: 2 min 8 s.
 
-| (DGX Spark, hybrid, NVIDIA checkpoint) | before | patch 14 |
-|---|---|---|
-| Loading weights, main model | 450–541 s | 150 s |
-| Loading weights, MTP drafter | 46 s | 32 s |
+| (DGX Spark, hybrid, NVIDIA checkpoint) | before | patch 14 | patches 14–18 |
+|---|---|---|---|
+| Loading weights, main model | 450–541 s | 150 s | 35.5 s |
+| Loading weights, MTP drafter | 46 s | 32 s | 1.2 s |
+| startup | ~11 min | 4 min 32 s | 2 min 8 s |
 
-It is on in both images. To compare against the stock copy, add `-e VLLM_LOAD_CLONE=0` to the
-`docker run` line in `scripts/serve.sh`. The profile, the benchmark and what was ruled out are in [HOW-IT-WORKS](docs/HOW-IT-WORKS.md#weight-loading-the-per-expert-h2d-copy-patch-14).
+Patch 14 is in all three images; 15–18 are in `Dockerfile` and `Dockerfile.v0.30`, not
+`Dockerfile.v0.29`. Each can be switched off to compare against the stock loader:
+`VLLM_LOAD_CLONE=0`, `VLLM_LOAD_PREAD=0`, `VLLM_MOE_NAME_INDEX=0`, `VLLM_LOAD_EMBED_CHUNK=0`,
+`VLLM_MTP_NAME_PREFILTER=0`, each added as `-e` to the `docker run` line in `scripts/serve.sh`. Profiles,
+benchmarks and validation are in [HOW-IT-WORKS](docs/HOW-IT-WORKS.md#weight-loading-the-per-expert-h2d-copy-patch-14)
+and [the section after it](docs/HOW-IT-WORKS.md#the-rest-of-weight-loading-patches-1518).
 
 ## Reduced draft vocabulary (`DRAFT_VOCAB=1`, default)
 
@@ -1183,11 +1191,22 @@ src/patch_qsa_fp8_kv.py           7. fp8_e4m3 KV cache on the QSA path (by @Nane
 src/patch_moe_load_clone.py      14. clone mmap-backed expert weights before the H2D copy          VLLM_LOAD_CLONE=0 disables
                                      (main weight load 541 -> 150 s on a Spark; docs/HOW-IT-WORKS.md)
 src/patches/*-v030.patch          patches 12 and 13 rebased on the v0.30 parser engine
+src/patch_load_pread.py          15. pread checkpoint tensors <= 64 MiB instead of mmap views     VLLM_LOAD_PREAD=0 disables
+                                     (never the PLE table; needs 14). Not in the v0.29 image
+src/patch_moe_name_index.py      16. indexed FusedMoE expert-name matching (~30 s of Python)        VLLM_MOE_NAME_INDEX=0 disables
+src/patch_embed_chunked_copy.py  17. embed_tokens / lm_head copied to the GPU in 64 MiB pieces     VLLM_LOAD_EMBED_CHUNK=0 disables
+                                     15-17 together: weight load 150 + 32 s -> 35 + 12 s (docs/HOW-IT-WORKS.md)
+src/patch_mtp_name_prefilter.py  18. MTP drafter skips non-MTP tensors before reading (12 -> 1.2 s) VLLM_MTP_NAME_PREFILTER=0 disables
 src/test_ple_mmap_cpu.py          CPU unit test for the gather (no GPU needed)
 src/test_qsa_exact_topk_cpu.py    CPU unit test for the exact top-k (no GPU needed)
 src/test_block_fp8_mtp_cpu.py     CPU unit test for the vllm#55513 backport (no GPU needed; v0.29 image)
+src/test_moe_name_index_cpu.py    CPU unit test: patch 16 visits exactly the entries of the original loop
+src/test_load_patches_cpu.py      CPU check of patches 15 and 17 against real checkpoint files
+src/test_mtp_prefilter_cpu.py     CPU check of patch 18: the drafter's exact tensor set, on a real snapshot
 tools/fp8_convert.py              side-layer bf16 -> blockwise fp8 (by @Saren-Arterius)
 tools/bench_moe_load.py           per-expert H2D copy micro-benchmark behind patch 14 (needs a free GPU)
+tools/profile_boot.sh             py-spy every process of a boot in 10 s slices (needs SYS_PTRACE, see header)
+tools/pyspy_slices.py             summarize those slices by process / thread / frame
 scripts/download-weights.sh       MODEL (default nvidia/Qwen3.8-Flash-Next-NVFP4), EXCLUDE, MAX_WORKERS, XET
 scripts/prepare-hybrid.sh         one-time: build the -fp8hybrid snapshot
 scripts/prepare-mtp-graft.sh      one-time: graft the NVFP4 MTP draft experts onto it (MODE=hybrid-mtp, RadixArk only)
