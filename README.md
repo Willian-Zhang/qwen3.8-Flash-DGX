@@ -949,7 +949,7 @@ mmap patch should apply; we have not booted one ourselves.
 | `WORKERS` | `32` | Threads used for the mmap gather: every gather at the default `FAST_ROWS=0`; with `FAST_ROWS=512`, only gathers above 512 unique rows (decode-sized gathers then run inline). |
 | `COMPILE_CACHE` | | Keep vLLM's compiled graphs across boots — this script recreates the container every run, so by default they are rebuilt each time. `<name>` = two docker volumes, `/abs/path` = two bind mounts. **−80 s ± 2 s of init engine** per boot after the first, 169 MB of disk; only worth setting if something recreates the container for you (a model-swapping proxy, CI, tournament runs). See [above](#optional-persistent-compile-cache-compile_cache). |
 | `LOG_REQUESTS` | `0` | `1` logs every prompt and output (`VLLM_LOGGING_LEVEL=DEBUG --enable-log-requests --enable-log-outputs`) so `tools/vllm_watch.py` can show sessions live. Debugging only: it puts user content in the Docker log, unbounded. |
-| `PROM_MULTIPROC` | `0` | `1` runs prometheus_client in multiprocess mode so engine-side metrics (`vllm:ple_mmap_*`) reach `/metrics`. Opt-in, because it stops vLLM exporting its `*_created` samples; see *Watching the mmapped table* below. |
+| `PROM_MULTIPROC` | `0` | `1` runs prometheus_client in multiprocess mode so engine-side metrics (`vllm:ple_mmap_*`) reach `/metrics`. Opt-in, because it stops vLLM exporting its `*_created` samples and the `process_*` / `python_*` metrics (`process_start_time_seconds` included; `vllm:ple_mmap_engine_start_time_seconds` stands in as a restart marker); see *Watching the mmapped table* below. |
 | `KV_CACHE_MEM` | | Passed through as `--kv-cache-memory-bytes`. `GPU_MEM` is a fraction of *total* device memory, so it leaves whatever was already resident on the table; vLLM prints the exact figure it would accept at startup ("Replace gpu_memory_utilization config with `--kv-cache-memory=...`"). On a Spark that headroom is also what the page cache uses for the PLE table, so taking it is a trade, not free memory — watch `vllm:ple_mmap_gather_seconds_total` when you do. |
 | `EXTRA` | | Extra vLLM flags, passed verbatim — e.g. `--long-prefill-token-threshold 1024` for multi-client responsiveness (see [the concurrency section](#decoding-clients-stall-while-other-clients-prefill-the-long-prefill-token-threshold-slider)), `--api-key <secret>`. |
 
@@ -986,10 +986,15 @@ prometheus_client runs in multiprocess mode. vLLM turns that on only for
 
 Switching to multiprocess mode was checked against a live server by diffing the
 complete `/metrics` before and after: vLLM's other 71 metric families are exported with
-identical label sets and no per-process `pid` label. The only loss is the 35
-`*_created` families, which prometheus_client does not export in multiprocess mode; that is why
-exporting the counters is opt-in, so nothing changes for existing dashboards unless you
-ask for it.
+identical label sets and no per-process `pid` label. Two things are lost: the 35
+`*_created` families, which prometheus_client does not export in multiprocess mode, and the
+default `process_*` / `python_*` collectors (`process_start_time_seconds`,
+`process_resident_memory_bytes`, `process_cpu_seconds_total`, `python_gc_*`, `python_info`),
+because vLLM then serves a fresh registry that holds only the multiprocess collector (reported
+by [@PhilX-rgb](https://github.com/PhilX-rgb) in [#36](https://github.com/blazux/qwen3.8-Flash-DGX/issues/36)).
+For restart detection, `vllm:ple_mmap_engine_start_time_seconds` carries the EngineCore's start
+time and changes on every restart. That is why exporting the counters is opt-in, so nothing
+changes for existing dashboards unless you ask for it.
 
 The views worth graphing:
 

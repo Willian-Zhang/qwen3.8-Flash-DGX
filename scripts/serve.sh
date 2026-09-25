@@ -246,9 +246,11 @@ PC_ARG=--no-enable-prefix-caching
 # PROMETHEUS_MULTIPROC_DIR here makes /metrics aggregate every vLLM process; the tmpfs
 # is fresh per container, so no stale per-process files survive a restart.
 # Measured against a single-process /metrics: vLLM's own series keep their names and
-# labels, with no per-process pid label; the only loss is the *_created samples, which
-# prometheus_client does not export in multiprocess mode. That is why it is off
-# by default: it changes what existing dashboards see.
+# labels, with no per-process pid label. What is lost: the *_created samples, and the
+# default process_*/python_* collectors (process_start_time_seconds, process_resident_memory_bytes,
+# process_cpu_seconds_total, python_gc_*, python_info), because vLLM serves a fresh registry holding
+# only the multiprocess collector. vllm:ple_mmap_engine_start_time_seconds stands in as a restart
+# marker (issue #36). That is why it is off by default: it changes what existing dashboards see.
 PROM_ARGS=(); [ "$PROM_MULTIPROC" = 1 ] && PROM_ARGS=(--tmpfs /tmp/vllm-prometheus:rw,size=256m -e PROMETHEUS_MULTIPROC_DIR=/tmp/vllm-prometheus)
 # Both are keyed by a hash of the model and the engine config, so one pair is safe to
 # share across profiles: a different recipe lands in a different entry. /root/.triton is

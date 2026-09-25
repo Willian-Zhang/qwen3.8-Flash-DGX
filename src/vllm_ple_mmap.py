@@ -471,7 +471,26 @@ def _prom() -> dict[str, object] | None:
             "in its own process. scripts/serve.sh exports them with PROM_MULTIPROC=1."
         )
     try:
-        from prometheus_client import Counter
+        from prometheus_client import Counter, Gauge
+
+        # In multiprocess mode vLLM serves a fresh registry holding only the multiprocess
+        # collector, so the default process_*/python_* collectors (process_start_time_seconds
+        # among them) are not exported. This gauge gives /metrics a restart marker again:
+        # it changes on every engine restart, which is what changes(...[..]) needs.
+        start = Gauge(
+            "vllm:ple_mmap_engine_start_time_seconds",
+            "Start time of the EngineCore process, seconds since the epoch. A restart marker "
+            "for PROM_MULTIPROC=1, where process_start_time_seconds is not exported.",
+            multiprocess_mode="max",
+        )
+        try:
+            import psutil
+
+            start.set(psutil.Process().create_time())
+        except Exception:  # psutil missing or /proc unreadable: time of registration
+            import time as _time
+
+            start.set(_time.time())
 
         _PROM = {
             "ops": Counter(
