@@ -16,7 +16,10 @@ import sys
 import time
 
 import vllm.model_executor.model_loader.weight_utils as wu
-from vllm.models.qwen3_8_flash_next.nvidia.mtp import _remap_mtp_weight_name
+try:
+    from vllm.models.qwen3_8_flash_next.nvidia.mtp import _remap_mtp_weight_name
+except ImportError:  # v0.30: package renamed
+    from vllm.models.qwen4_exp.nvidia.mtp import _remap_mtp_weight_name
 
 snap = sys.argv[1]
 names = json.load(open(os.path.join(snap, "model.safetensors.index.json")))["weight_map"]

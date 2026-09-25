@@ -11,11 +11,16 @@ loads. The kept names are exactly the ones the drafter would have kept (same fun
 the primary checkpoint source has an empty prefix; with secondary sources the filter is not used).
 src/test_mtp_prefilter_cpu.py checks the kept set against the checkpoint index."""
 import ast
+import os
+import re
 import sys
 
 SP = sys.argv[1]
 WU = f"{SP}/vllm/model_executor/model_loader/weight_utils.py"
-MTP = f"{SP}/vllm/models/qwen3_8_flash_next/nvidia/mtp.py"
+# preview / v0.29 layout, then v0.30 (package renamed to qwen4_exp)
+MTPS = [f"{SP}/vllm/models/{p}/nvidia/mtp.py" for p in ("qwen3_8_flash_next", "qwen4_exp")]
+MTP = next((p for p in MTPS if os.path.exists(p)), None)
+assert MTP, f"mtp.py not found: {MTPS}"
 
 s = open(WU).read()
 assert "from vllm.model_executor.model_loader.ep_weight_filter import (\n    should_skip_weight,\n)" in s
@@ -56,17 +61,20 @@ ast.parse(s)
 open(WU, "w").write(s)
 
 m = open(MTP).read()
-old = "        return loader.load_weights(remap_weight_names())\n"
-assert m.count(old) == 1, f"Qwen3_8FlashNextMTP.load_weights return: expected 1, found {m.count(old)}"
-m = m.replace(old, (
+# v0.30 passes mapper=mapper; it only drops names after the remap, so the kept set is unchanged.
+ret = re.compile(r"^        return (loader\.load_weights\(remap_weight_names\(\)(?:, mapper=mapper)?\))\n", re.M)
+found = ret.findall(m)
+assert len(found) == 1, f"MTP load_weights return: expected 1, found {len(found)}"
+call = found[0]
+m = ret.sub(lambda _: (
     "        if _qwen38_os_pf.environ.get(\"VLLM_MTP_NAME_PREFILTER\", \"1\") == \"0\" or getattr(\n"
     "            self, \"secondary_weights\", ()\n"
     "        ):\n"
-    "            return loader.load_weights(remap_weight_names())\n"
+    f"            return {call}\n"
     "        from vllm.model_executor.model_loader import weight_utils as _q38_wu\n"
     "\n"
     "        with _q38_wu.qwen38_keep_only(lambda n: _remap_mtp_weight_name(n) is not None, \"MTP\"):\n"
-    "            return loader.load_weights(remap_weight_names())\n"))
+    f"            return {call}\n"), m)
 anchor = "def _remap_mtp_weight_name(name: str) -> str | None:\n"
 assert m.count(anchor) == 1, "_remap_mtp_weight_name not found"
 m = m.replace(anchor, "import os as _qwen38_os_pf  # qwen38-flash-dgx patch 18\n\n\n" + anchor)

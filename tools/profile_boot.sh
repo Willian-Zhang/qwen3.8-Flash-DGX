@@ -3,11 +3,11 @@
 # "Application startup complete". Every process in the container (APIServer = pid 1, EngineCore)
 # and every thread, idle ones included, so the slices can be split by process/thread afterwards.
 #
-# The container must run with ptrace allowed and py-spy mounted, e.g. in systemd/qwen38-flash.env:
-#   DOCKER_EXTRA=--cap-add=SYS_PTRACE -v /home/willian/run/qwen-load-profile:/prof
-# with py-spy installed there once:
+# The container must run with ptrace allowed and py-spy mounted: add
+#   --cap-add=SYS_PTRACE -v $HOME/run/qwen-load-profile:/prof
+# to the docker run line in scripts/serve.sh, with py-spy installed there once:
 #   docker run --rm -v ~/run/qwen-load-profile:/out --entrypoint pip qwen38-flash-dgx install --target /out/pyspy py-spy
-# Start this script first, then restart the service: it waits for a container started after it.
+# Start this script first, then start the server: it waits for a container started after it.
 set -u
 NAME="${NAME:-qwen38-flash}"
 PYSPY="${PYSPY:-/prof/pyspy/bin/py-spy}"  # paths inside the container

@@ -4,7 +4,7 @@
 vLLM's safetensors_weights_iterator yields mmap views; every consumer then page-faults the file
 pages in on its first touch (patch 14's clone, the linear layers' copy_). In the loader's own
 order, pread of each tensor into ordinary memory runs at ~10.9 GiB/s against ~2.2 GiB/s for the
-mmap view + clone (cold client cache, docs/load-time-investigation.md). Tensors above 64 MiB stay
+mmap view + clone (cold client cache, docs/HOW-IT-WORKS.md). Tensors above 64 MiB stay
 mmap views, and the PLE table (ngram_embedding.shard_*) is never read here: vllm_ple_mmap serves it
 from its own memmap and drops what the loader hands it. The storage of every pread tensor is
 tagged, so patch 14 skips its now redundant clone. Needs patch 14 applied first."""

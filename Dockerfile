@@ -183,7 +183,7 @@ RUN cd ${SP} && patch --batch --forward --fuzz=0 -p1 < /tmp/qwen-tool-marker-gua
 COPY src/patch_moe_load_clone.py /tmp/patch_moe_load_clone.py
 RUN python3 /tmp/patch_moe_load_clone.py ${SP} && rm /tmp/patch_moe_load_clone.py
 
-# --- 15-17. The rest of weight loading (docs/load-time-investigation.md, "The rest of the boot") ---
+# --- 15-17. The rest of weight loading (docs/HOW-IT-WORKS.md, "The rest of weight loading") ---
 # 15: tensors <= 64 MiB are read with pread into ordinary memory instead of yielded as mmap views
 #     (~10.9 vs ~2.2 GiB/s in the loader's order); the PLE table shards are never read.
 # 16: RoutedExperts.load_weights looks names up in an index instead of substring-testing all 1,536
