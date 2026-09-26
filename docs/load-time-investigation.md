@@ -31,12 +31,11 @@ Handoff notes. Goal: cut the ~9 min of "Loading weights" at every boot of `qwen3
   Settings: `systemd/qwen38-flash.env`; unit: `systemd/qwen38-flash.service`.
 - Weights are served from the kc3000 NFS share first (`HF_HUB_DIRS`, NFS over RDMA, mounted `ro` at
   `/mnt/kc3000-nfs`), local `~/.cache/huggingface/hub` is the boot-time fallback (full copy kept).
-- Branch `spark-service` = `upstream/main` (blazux, 5be6637) + the systemd service, `HF_HUB_DIRS`
-  and patches 14–18 (pushed). Upstream: patch 14 merged as blazux#33; 15–18, ported to
-  `Dockerfile.v0.30` and boot-tested there, are blazux#34 (branch `load-patches-15-18`, worktree
-  `~/run/qwen-pr-load`). vLLM: vllm-project/vllm#58720 (patch 16, merged 09-26 in a rewritten
-  form), issue vllm-project/vllm#58726 (the mmap H2D path; prefault proposal posted 09-26, see the
-  last section). The LMCache experiment lives on its own branch, `lmcache`.
+- Branch `spark-service` = `upstream/main` (blazux, 5108d90) + the systemd service, `HF_HUB_DIRS`,
+  `DOCKER_EXTRA` and these notes (pushed). Patches 14–18 are upstream: blazux#33 (14) and blazux#34
+  (15–18, also on `Dockerfile.v0.30`), both merged. vLLM: vllm-project/vllm#58720 (patch 16, merged
+  09-26 in a rewritten form), issue vllm-project/vllm#58726 (the mmap H2D path; prefault proposal
+  posted 09-26, see the last section). The LMCache experiment lives on its own branch, `lmcache`.
 - `/mnt/models/gb10` (Synology NFS, 10 GbE) is **the backup mount — never delete anything there**.
   It holds a verified RadixArk checkpoint + hybrid (restored and sha-checked 2026-09-23); it is
   deliberately not in `HF_HUB_DIRS`.
