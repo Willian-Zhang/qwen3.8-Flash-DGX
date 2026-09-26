@@ -799,3 +799,15 @@ our kernel.
 
 Patches 12 and 13 are the same changes rebased on the v0.30 parser engine; the 30-case test module
 passes unchanged. Patch 11 (vllm#55513) is in the release.
+
+**fp8 KV cache (patch 7).** `src/patch_qsa_fp8_kv_v030.py`. vLLM quantizes on the write side
+already (`do_kv_cache_update` with the layer's `_k_scale`/`_v_scale`), so the patch only touches the
+read side: the split-K kernel dequantizes K and V with vLLM's own `_cast_kv_tile` (fp8 per-tensor),
+BLOCK_N is halved under quantization to fit sm_121's 101,376-byte shared memory, the warmup compiles
+the fp8 specialization, uint8 storage is reinterpreted as fp8 (a bit view), and the bf16-only guards
+are widened, the one inherited from `FlashAttentionImpl` included, since QSA never uses its kernels.
+Two differences from the preview version. The QSA indexer's caches are left alone: v0.30 keeps the
+raw-key ring in bf16 and gives the compressed keys their own dtype (`indexer_kv_dtype`, native fp8,
+vllm#54890). And the read passes the layer's real scales to the kernel; the preview read with a fixed
+1.0, which only matched because the writes used 1.0 as well. With `--kv-cache-dtype auto` the branch
+is compiled out: first-token log-probs 5/5 identical to the image without the patch.

@@ -2,11 +2,11 @@
 # to the v0.30 layout (PLE hashing in ops/ple.py + ngram_embedding.py, QSA indexer split into prefill/decode
 # paths in ops/qsa_indexer.py after vllm#54513):
 #   1 PLE mmap, 2 GB10 FLA fixes, 4 prefix-caching block_size fix, 5 exact top-k, 6 hybrid mode,
-#   8 deterministic top-k kernel, 10 reduced draft vocabulary, 12 Qwen tool preamble fix,
+#   7 fp8 KV cache, 8 deterministic top-k kernel, 10 reduced draft vocabulary, 12 Qwen tool preamble fix,
 #   13 quoted Qwen tool markers stay text, 14 MoE weight-load clone (#33), 15-18 the rest of weight
 #   loading (pread, expert-name index, chunked embedding copy, MTP name prefilter).
-# Not needed here: 3 (vllm#50729), 9 (vllm#52775) and 11 (vllm#55513) are in the release. Not ported yet:
-# 7 (fp8 KV cache). 12 and 13 are the same fixes as on v0.29, rebased (src/patches/*-v030.patch).
+# Not needed here: 3 (vllm#50729), 9 (vllm#52775) and 11 (vllm#55513) are in the release.
+# 12 and 13 are the same fixes as on v0.29, rebased (src/patches/*-v030.patch).
 #
 #   docker build -f Dockerfile.v0.30 -t qwen38-flash-dgx:v0.30 .
 #   IMAGE=qwen38-flash-dgx:v0.30 scripts/serve.sh      # serve.sh reads the image label for the op names
@@ -50,6 +50,14 @@ RUN cp ${MO} ${MO}.orig \
  && sed -i 's/^from \. import model$/from . import model\nfrom vllm_fp8_hybrid_modelopt import excluded_quant_config as _fp8_hybrid_excluded/' ${QSA} \
  && grep -q "_fp8_hybrid_excluded(quant_config)" ${QSA} && grep -q "^from vllm_fp8_hybrid_modelopt import" ${QSA} \
  && python3 -c "import ast; ast.parse(open('${QSA}').read()); print('qsa.py hooked OK')"
+
+# --- 7. fp8_e4m3 main KV cache on the QSA path (--kv-cache-dtype fp8_e4m3; KV_DTYPE=fp8_e4m3) ---
+# Same change as the preview's patch 7 (@Nanetnounou, issue #6), re-targeted: dequantize on the read
+# side of the split-K kernel with vLLM's _cast_kv_tile and the layer's real scales, widen the guards.
+# The indexer caches are left to v0.30 (raw keys bf16, compressed keys with their own dtype knob).
+# Inert with --kv-cache-dtype auto (the Triton branch is compiled out).
+COPY src/patch_qsa_fp8_kv_v030.py /tmp/patch_qsa_fp8_kv_v030.py
+RUN python3 /tmp/patch_qsa_fp8_kv_v030.py ${SP} && rm /tmp/patch_qsa_fp8_kv_v030.py
 
 # --- 8. Deterministic persistent_topk kernel (@jschmied, vllm#55122), built with the image's nvcc ---
 # v0.30 changed the stock kernel (vllm#54110 low-smem fallback, vllm#56346 sampled filtering): whether GB10

@@ -155,6 +155,13 @@ inline-quoted-marker case is unchanged.
   that memory was counted as free: our 714k-token boot had 1.6 GiB of vLLM swapped out. With the
   fast load nothing is swapped and the same recipe gets ~520k (v0.30) to ~630k (preview) tokens.
   For a pool that does not move between boots, set `KV_CACHE_MEM`.
+- **fp8 KV cache on v0.30** (patch 7, the preview's by [@Nanetnounou](https://github.com/Nanetnounou), re-targeted):
+  `./flash serve v0.30 KV_DTYPE=fp8_e4m3 CTX=1000000`. 1,039k-token pool at `GPU_MEM=0.80`; needles found
+  at 196k, 413k, 635k and **931k tokens**; tournament 87.1% (one run, bf16 87.3–88.1%); decode −4%,
+  prefill −3 to −17%. It now reads the cache with the layer's real scales (the preview read with 1.0,
+  correct only because the writes used 1.0 too). Prefix caching works at 3,184-token blocks instead of
+  1,600: the cache aligns attention blocks to the Mamba state page, and fp8 halves the bytes per token.
+  This was the last patch missing on v0.30.
 - **Determinism is sequential** ([#32](https://github.com/blazux/qwen3.8-Flash-DGX/issues/32)): the
   same request repeated one at a time is byte-identical; concurrent requests are not batch-invariant,
   a vLLM limit for GDN models. Scope added to [Deterministic top-k](#deterministic-top-k-det_topk1-default).
@@ -384,7 +391,7 @@ one wins; anything below it stays an option.
 | Prefix caching (`PREFIX_CACHE=1`) | **on** | ~14 s → ~1.4 s TTFT on a repeated 20k prefix |
 | `MTP=3` | option (`MTP=2` default) | +7% decode, −1 point at the tournament (44 vs 45/51) |
 | NVFP4 MTP draft experts (`MODE=hybrid-mtp`) | option | +22% KV pool, −3.9 GiB weights, decode unchanged here, tournament neutral (44/51) |
-| fp8 KV cache (`KV_DTYPE=fp8_e4m3`) | option | ×1.9 KV pool, 1M context; −10% decode, −30% prefill, one scenario lost |
+| fp8 KV cache (`KV_DTYPE=fp8_e4m3`) | option | ×1.9 KV pool, 1M context. Preview base: −10% decode, −30% prefill, one scenario lost. v0.30 base: −4% decode, −3 to −17% prefill, tournament 87.1% (1 run) vs 87.3–88.1% in bf16; prefix-cache blocks twice as coarse |
 | M%4 GEMM padding (`PAD_M4=1`) | option | no-op with prefix caching on; −40% TTFT at 8k with it off |
 | Exact `torch.topk` (`EXACT_TOPK=1`) | fallback | deterministic like the kernel, −20–40% long prefill |
 | Persistent compile cache (`COMPILE_CACHE`) | option | −80 s ± 2 s of init engine per boot after the first; startup only, outputs and tournament unaffected |
@@ -416,7 +423,7 @@ Profiles (`profiles/*.env`, each a handful of `serve.sh` variables; copy one to 
 | `default` | hybrid, YaRN 500k, deterministic top-k, reduced draft vocabulary, prefix caching, MTP=2 | the recommended one: best tournament score (45/51) |
 | `speed` | default + `MTP=3` | +7% decode for about one tournament point |
 | `context` | `MODE=hybrid-mtp` (NVFP4 MTP draft experts) | +22% KV pool for concurrency or long contexts, decode unchanged |
-| `context-1m` | hybrid + `KV_DTYPE=fp8_e4m3`, 1M context | when you need 1M tokens in one request (speed and some quality cost; preview base only) |
+| `context-1m` | hybrid + `KV_DTYPE=fp8_e4m3`, 1M context | when you need 1M tokens in one request (small speed cost). Preview base; on v0.30: `./flash serve v0.30 KV_DTYPE=fp8_e4m3 CTX=1000000` |
 | `shared` | default + `--long-prefill-token-threshold 1024` | several clients at once: decoding stays responsive while others prefill, single-stream TTFT −17–36% |
 | `published` | `MODE=nvfp4`, YaRN 500k | the checkpoint exactly as published, nothing to prepare; ~26 tok/s |
 | `native` | hybrid, 262k, no YaRN | if you never go past the native context |
@@ -784,7 +791,7 @@ IMAGE=qwen38-flash-dgx:v0.30 MODE=hybrid YARN=1 CTX=500000 scripts/serve.sh
 | 11 block-FP8 MTP experts | vllm#55513 backport | **in the release, dropped** |
 | 12, 13 Qwen tool-marker fixes | `src/patches/*.patch` | same fixes rebased on the new parser engine (`src/patches/*-v030.patch`), same 30-case test module |
 | 2, 4, 6, 10, 14 | as is | unchanged |
-| 7 fp8 KV cache | not ported | not ported (`KV_DTYPE` must stay `auto`) |
+| 7 fp8 KV cache | not ported | **ported** (`src/patch_qsa_fp8_kv_v030.py`): only the main attention's read path and guards; the indexer caches are v0.30's own. Inert in bf16 (log-probs 5/5 identical) |
 
 Measured on our GX10, NVIDIA checkpoint, hybrid, YaRN 500k, MTP=2, head-to-head with the v0.29 image
 that ran production:

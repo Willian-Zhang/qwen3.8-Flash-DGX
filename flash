@@ -228,7 +228,7 @@ cmd_doctor() {
   if [ -n "${HF_TOKEN:-}${HUGGING_FACE_HUB_TOKEN:-}" ]; then ok "HF token in the environment"; else info "no HF_TOKEN: downloads work but the Hub may rate-limit; export HF_TOKEN=... to be safe"; fi
 
   step "profile sanity"
-  if { [ "$BASE_EXPECTED" = v0.29 ] || [ "$BASE_EXPECTED" = v0.30 ]; } && [ "$KV_DTYPE" != auto ]; then fail "KV_DTYPE=$KV_DTYPE is not available on the $BASE_EXPECTED base (fp8 KV not ported) — use a preview-base profile"; fi
+  if [ "$BASE_EXPECTED" = v0.29 ] && [ "$KV_DTYPE" != auto ]; then fail "KV_DTYPE=$KV_DTYPE is not available on the $BASE_EXPECTED base (fp8 KV not ported) — use a preview-base profile"; fi
   if [ "${YARN:-0}" = 0 ] && [ "${CTX:-262144}" -gt 262144 ]; then fail "CTX=$CTX above the native 262144 needs YARN=1"; fi
   if [ "$KV_DTYPE" = auto ] && [ "${CTX:-262144}" -gt 500000 ]; then warn "CTX=$CTX in bf16 KV: 500k is the validated ceiling (800k got OOM-killed on a long prefill); 1M needs KV_DTYPE=fp8_e4m3"; fi
   [ "$FAILURES" -eq 0 ] && [ "$WARNINGS" -eq 0 ] && ok "profile looks fine"

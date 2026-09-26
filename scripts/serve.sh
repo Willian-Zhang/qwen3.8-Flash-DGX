@@ -57,7 +57,7 @@
 #                     README). A bare name becomes docker volumes, an absolute path binds dirs
 #   IMAGE=qwen38-flash-dgx   MODEL=nvidia/Qwen3.8-Flash-Next-NVFP4   (RadixArk/Qwen3.8-Flash-Next-NVFP4 still supported: MODEL=...)
 #   BASE=             preview|v0.29|v0.30 — normally read from the image label (Dockerfile vs Dockerfile.v0.29/.v0.30).
-#                     On v0.29/v0.30: KV_DTYPE must stay auto (fp8 KV not ported), PAD_M4 is a no-op.
+#                     On v0.29: KV_DTYPE must stay auto (fp8 KV not ported). On v0.29/v0.30 PAD_M4 is a no-op.
 set -euo pipefail
 
 NAME="${NAME:-qwen38-flash}"
@@ -199,7 +199,7 @@ fi
 # Options the v0.29 image does not carry: patch 7 (fp8 KV on the QSA path) is not ported, and patch 9
 # (M%4 padding) is unnecessary there (vllm#52775 is in the release) so the image has no such kernel.
 if [ "$BASE" = "v0.29" ] || [ "$BASE" = "v0.30" ]; then
-  if [ "$KV_DTYPE" != auto ]; then
+  if [ "$BASE" = "v0.29" ] && [ "$KV_DTYPE" != auto ]; then
     echo "!! KV_DTYPE=$KV_DTYPE: the fp8 KV cache patch is not ported to the $BASE base yet — use the preview image (Dockerfile) for fp8 KV"; exit 1
   fi
   [ "$PAD_M4" != 0 ] && echo "!! PAD_M4 has no effect on the $BASE base (vllm#52775 fixed the fp8 GEMM there); ignoring" && PAD_M4=0
