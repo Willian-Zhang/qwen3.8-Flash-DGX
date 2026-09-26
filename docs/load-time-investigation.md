@@ -18,6 +18,10 @@ Handoff notes. Goal: cut the ~9 min of "Loading weights" at every boot of `qwen3
 - **Patches 15–18** (pread for small tensors, indexed expert-name matching, chunked embedding copy,
   MTP name prefilter; see "Patches 15–17" below): main load 150 → 35.5 s, MTP 32 → 1.2 s, startup
   4 min 32 s → **2 min 8 s**. Greedy probe identical; drafter counts identical with patch 18 on and off.
+- **2026-09-26: the cause is unmapped pages, not file-backed ones.** The copy is slow when its
+  source pages are not yet mapped in the process's page tables, cached or not; once touched through
+  the mapping they copy in 0.021 ms. Touching 1 byte/page first ("prefault") alone takes the main
+  load 443 → 26.5 s in a boot A/B. See "Mechanism corrected, prefault boot A/B" below.
 
 ## State at handoff
 
@@ -30,8 +34,9 @@ Handoff notes. Goal: cut the ~9 min of "Loading weights" at every boot of `qwen3
 - Branch `spark-service` = `upstream/main` (blazux, 5be6637) + the systemd service, `HF_HUB_DIRS`
   and patches 14–18 (pushed). Upstream: patch 14 merged as blazux#33; 15–18, ported to
   `Dockerfile.v0.30` and boot-tested there, are blazux#34 (branch `load-patches-15-18`, worktree
-  `~/run/qwen-pr-load`). vLLM: vllm-project/vllm#58720 (patch 16), issue vllm-project/vllm#58726
-  (the mmap H2D path). The LMCache experiment lives on its own branch, `lmcache`.
+  `~/run/qwen-pr-load`). vLLM: vllm-project/vllm#58720 (patch 16, merged 09-26 in a rewritten
+  form), issue vllm-project/vllm#58726 (the mmap H2D path; prefault proposal posted 09-26, see the
+  last section). The LMCache experiment lives on its own branch, `lmcache`.
 - `/mnt/models/gb10` (Synology NFS, 10 GbE) is **the backup mount — never delete anything there**.
   It holds a verified RadixArk checkpoint + hybrid (restored and sha-checked 2026-09-23); it is
   deliberately not in `HF_HUB_DIRS`.
@@ -117,6 +122,9 @@ boot. The benchmark does **not** reproduce the boot's absolute rate. ~89% of a 5
 for 149k tensors, ~3.2 ms each, about 2× variant A. That could be memory pressure (2–5 GiB free
 during loading), or `copy_` seeing narrowed views rather than whole tensors; neither is verified.
 The ratio carried over: 541 → 150 s in the boot.
+
+**Superseded 2026-09-26** (see "Mechanism corrected, prefault boot A/B"): the slow case is source
+pages not mapped in the process, not file-backed pages. Original conclusion, kept for the record:
 
 **Conclusion:** the per-tensor pageable H2D copy is slow *when the source is a file-backed mmap page*,
 cached or not; from anonymous memory it is fast. Why is unverified — plausible: the CUDA driver's
@@ -373,6 +381,56 @@ The new timeline: container start → EngineCore init 23 s, model construction +
 main load 35 s (the PLE prewarm runs inside it), MTP load 12 s, init engine 34 s, API
 multimodal warmup 14 s, rest ~9 s. After patch 18 the MTP load is 1.2 s. Remaining candidates: c
 (< 1 s now that e and d are in), f' (page cache, first-request speed), g (~20 s, config).
+
+## Mechanism corrected, prefault boot A/B (2026-09-26)
+
+Prompted by hclsys on vllm#58726: on his GB10, cached pages copied fast (0.027 ms/tensor).
+
+**Micro-benchmark** (`.cache/copy-recheck/`, git-ignored: `bench_copy_recheck.py`, `run.sh`,
+`RESULTS.md`). Shard 00006 (19,714 expert tensors, 8.46 GiB), NFS and local NVMe, service stopped,
+one fresh root container per run, residency checked with `cachestat` and `mincore`, two passes.
+ms per tensor, whole per-tensor op:
+
+| pages before the loop | A: view → `copy_` | F: clone | P: touch 1 B/page | M: `MADV_POPULATE_READ` |
+|---|---|---|---|---|
+| not cached | 1.7–3.0 | 0.24–0.62 | 0.08–0.64 | 0.21–1.11 |
+| cached (`preadv`, = E) | 1.9–2.6 | 0.11–0.23 | 0.04–0.17 | 0.60–0.90 |
+| cached and mapped (touched through the same mmap) | **0.021** | | | |
+
+- The slow case is source pages that are not mapped in the process's page tables, cached or not.
+  Mapped pages copy ~100× faster. File-backed vs anonymous memory does not matter; the clone helps
+  because its output is freshly written, mapped memory. E was a valid control (p1 reproduced it:
+  1.93 ms).
+- P was fastest or tied with the clone in every cell and allocates nothing. `MADV_POPULATE_READ` did
+  not help; not understood.
+- In a real boot nothing has touched the checkpoint through safetensors' mapping, so on GB10 the
+  copy is always slow, warm cache or not.
+- The 09-25 `mincore` anomaly is explained: as a non-root user on the root-owned local blobs the
+  kernel reports every page resident (`mincore` = 1.000 right after `DONTNEED`) and `cachestat`
+  returns EPERM. Measure as root (containers) or as the file's owner.
+
+**Boot A/B** (`.cache/boot-ab/`, git-ignored: `ab.sh`, `logs/`, `RESULTS.md`). Weights from NFS,
+client cache dropped before every boot, boots interleaved. Only the loader changed: a bind-mounted
+`weight_utils.py` with a `VLLM_LOAD_PREFAULT` hook (no-op when unset) plus the patch 14/15
+switches. Patches 16–18 on in every boot.
+
+| config | main load | MTP load | start → `/health` | swapped out before the KV profile | KV cache |
+|---|---|---|---|---|---|
+| base: patch 15 `pread` + patch 14 clone (3 boots) | 21.9–22.5 s | 1.2 s | 103–104 s | 0.01–0.24 GiB | 16.9–17.0 GiB |
+| prefault views ≤ 64 MiB, `pread` + clone off (3 boots) | 26.1–26.7 s | 0.9–1.0 s | 118–119 s | 2.8–2.9 GiB | 19.4–19.5 GiB |
+| all three off (1 boot) | 443 s | 16.5 s | 549 s | 5.2 GiB | 19.1 GiB |
+
+Greedy probe texts and first-token logprobs identical in all 7 boots. `pread` is ~4.3 s faster on
+the main load (~15 s to ready). The prefault boots' bigger KV cache is the swap effect (see
+`.cache/NOTES-2026-09-25.md`): they push ~2.9 GiB of other memory to swap during the load (netdata
+`mem.swapio`), which vLLM counts as free. So it is not a memory saving, and `pread` is not worse
+on memory. Production stays on `pread` + clone.
+
+**Upstream status.** vllm#58720 merged 09-26 as `ad6817b68` (Michael Goin's rewrite of patch 16);
+patch 16's script will need dropping once the base image includes it. vllm#58726: proposal posted
+(prefault in `safetensors_weights_iterator`, asking maintainers about the gate and the size cap);
+no reply yet. Next: measure prefault on the discrete-GPU machine, where the pageable copy is
+staged through a CPU memcpy anyway.
 
 ## Rerunning the benchmark
 
