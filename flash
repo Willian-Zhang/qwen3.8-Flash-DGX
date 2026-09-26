@@ -283,7 +283,7 @@ cmd_serve() {
   local b; b="$(image_base)"
   [ -n "$b" ] && [ "$b" != "$BASE_EXPECTED" ] && die "$IMAGE is a '$b'-base image, profile '$profile' expects '$BASE_EXPECTED' — run: ./flash setup $profile"
   if [ "$(container_state)" = running ]; then info "$NAME is running and will be replaced"; fi
-  if [ "$DRY" = 1 ]; then info "dry run: would exec scripts/serve.sh with the environment above"; env | grep -E '^(MODE|IMAGE|NAME|PORT|CTX|YARN|MTP|SEQS|GPU_MEM|KV_DTYPE|PREFIX_CACHE|DET_TOPK|EXACT_TOPK|PAD_M4|DRAFT_VOCAB|MADVISE|FAST_ROWS|EFFORT_ALIAS|PREWARM|COMPILE_CACHE|EXTRA|BASE|LOG_REQUESTS|WORKERS)=' | sort | sed 's/^/    /'; return 0; fi
+  if [ "$DRY" = 1 ]; then info "dry run: would exec scripts/serve.sh with the environment above"; env | grep -E '^(MODE|IMAGE|NAME|SERVED_MODEL_NAME|PORT|CTX|YARN|MTP|SEQS|GPU_MEM|KV_DTYPE|PREFIX_CACHE|DET_TOPK|EXACT_TOPK|PAD_M4|DRAFT_VOCAB|MADVISE|FAST_ROWS|EFFORT_ALIAS|PREWARM|COMPILE_CACHE|EXTRA|BASE|LOG_REQUESTS|WORKERS)=' | sort | sed 's/^/    /'; return 0; fi
   remember_profile "$profile"
   exec "$HERE/scripts/serve.sh"
 }
@@ -303,7 +303,8 @@ cmd_wait() {
     if api_up; then
       printf '\r%-100s\n' "  ready after $(( $(date +%s) - t0 )) s."
       docker logs "$NAME" 2>&1 | grep -E 'GPU KV cache size|Maximum concurrency' | tail -1 | sed 's/.*\[kv_cache_utils.*\] /  /'
-      echo "  API: http://localhost:$PORT/v1  (model 'qwen3.8-flash-next')   try: ./flash test"
+      MODEL_NAME="$(curl -sf -m 3 "http://127.0.0.1:$PORT/v1/models" | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"][0]["id"])' 2>/dev/null || echo unknown)"
+      echo "  API: http://localhost:$PORT/v1  (model '$MODEL_NAME')   try: ./flash test"
       return 0
     fi
     local l; l="$(docker logs --tail 40 "$NAME" 2>&1 | grep -E 'Loading safetensors|Loading weights took|Model loading took|torch.compile took|Capturing CUDA|KV cache size|prewarm|startup' | tail -1 | cut -c1-90 || true)"

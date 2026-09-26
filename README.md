@@ -45,8 +45,8 @@ docker logs -f qwen38-flash                   # ready at "Application startup co
 scripts/smoke-test.sh                         # health, coherence, prefix-cache hit, determinism, tok/s
 ```
 
-OpenAI-compatible API on `http://localhost:18300/v1`, model name `qwen3.8-flash-next`,
-tool calling and reasoning parsers on. Every default is the setting that scored best on our
+OpenAI-compatible API on `http://localhost:18300/v1`, default model name `qwen3.8-flash-next`
+(configurable with `SERVED_MODEL_NAME`), tool calling and reasoning parsers on. Every default is the setting that scored best on our
 agentic tournament (see [How the defaults are chosen](#how-the-defaults-are-chosen-quality-first-speed-as-an-option));
 what you get on a GX10: ~34 tok/s single-stream decode, ~2,500–2,800 tok/s prefill, a ~520–640k-token
 KV pool (larger numbers seen before 2026-09-25 were partly swap, see [#34](https://github.com/blazux/qwen3.8-Flash-DGX/pull/34)), prefix caching, deterministic greedy output, 500k tokens of context. The checkpoint is
@@ -483,6 +483,7 @@ curl http://localhost:18300/v1/chat/completions -H 'Content-Type: application/js
   "max_tokens": 512
 }'
 ```
+The example uses the default served model name. If you start the server with `SERVED_MODEL_NAME=<name>`, use that value in the request's `model` field instead.
 
 `MODE=nvfp4 scripts/serve.sh` (the default) serves the checkpoint as published at the native
 262k context; `YARN=1 CTX=500000` goes to 500k (validated with a needle-in-a-haystack at 414k
@@ -967,6 +968,7 @@ mmap patch should apply; we have not booted one ourselves.
 | `FAST_ROWS` | `0` | PLE gathers of up to this many unique rows run inline on one thread; larger ones are split across the `WORKERS` pool. `0` sends every gather to the pool, so page faults on rows the page cache dropped overlap instead of queueing: +8% decode at 1 stream, +17% aggregate at 4 streams, same rows (see the 2026-09-14 update). `512` = the old inline fast path, faster only when every row is already cached. |
 | `PAD_M4` | `0` | `1` = pad M%4 in the blockwise-fp8 GEMM (hybrid mode). No-op with `PREFIX_CACHE=1`; about −40% TTFT at 8k with `PREFIX_CACHE=0`. |
 | `EFFORT_ALIAS` | `1` | Accept every `reasoning_effort` a client can send. The checkpoints' template takes only `xhigh` (default), `medium` and `low` and 400s the rest — including Claude Code's default `high`. `1` serves a copy of the checkpoint's own template whose effort-resolving line maps `high`/`max` → `xhigh` and `minimal` → `low` (other values render byte-identically; the copy goes to the first writable of `$HF_CACHE/qwen38-flash-dgx/chat-templates/`, `~/.cache/qwen38-flash-dgx/chat-templates/` and `.cache/chat-templates/` in the checkout, and is bind-mounted into the container, so a root-owned HF cache does not disable it). Applied only when the template has that check and that exact line. `0` = the template as shipped. |
+| `SERVED_MODEL_NAME` | `qwen3.8-flash-next` | Model name exposed by the OpenAI-compatible API (`--served-model-name`). Set this to a stable client-facing name without changing the underlying Hugging Face `MODEL`. |
 | `PORT` | `18300` | API port |
 | `CTX` | `262144` | Max context. Native is 262144; with `YARN=1` up to `500000` is validated. |
 | `YARN` | `0` | `1` = YaRN rope scaling (factor 4, Qwen's recipe) for `CTX` > 262144. |
@@ -1229,7 +1231,7 @@ scripts/download-weights.sh       MODEL (default nvidia/Qwen3.8-Flash-Next-NVFP4
 scripts/prepare-hybrid.sh         one-time: build the -fp8hybrid snapshot
 scripts/prepare-mtp-graft.sh      one-time: graft the NVFP4 MTP draft experts onto it (MODE=hybrid-mtp, RadixArk only)
 tools/vllm_watch.py               live per-session view of prompts / reasoning / outputs / stats (needs LOG_REQUESTS=1; @0x3dlux)
-scripts/serve.sh                  MODE=nvfp4|hybrid|hybrid-mtp, PREFIX_CACHE, DET_TOPK, DRAFT_VOCAB, MADVISE, EXACT_TOPK, PAD_M4, KV_DTYPE, YARN, ...
+scripts/serve.sh                  MODE=nvfp4|hybrid|hybrid-mtp, SERVED_MODEL_NAME, PREFIX_CACHE, DET_TOPK, DRAFT_VOCAB, MADVISE, EXACT_TOPK, PAD_M4, KV_DTYPE, YARN, ...
 scripts/smoke-test.sh             health, coherence, prefix-cache hit, determinism, tok/s
 scripts/greedy-probe.sh           greedy probe set; diff two arms to gate a draft/checkpoint swap
 docs/HOW-IT-WORKS.md
