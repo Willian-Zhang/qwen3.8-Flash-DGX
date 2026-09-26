@@ -657,12 +657,14 @@ every variant produced byte-identical weights:
 | **B** a reused pinned bounce buffer | 0.22–0.26 |
 | **C** pinned staging per 3,072 tensors, one H2D + a GPU scatter | 0.25 |
 
-The copy is slow whenever its source is a file-backed page, cached (E) or not (A). From ordinary
-anonymous memory it is fast (F), and a plain clone does as well as pinned staging (B, C). The cause
-is not verified. The likely place is the driver's pageable-copy path on GB10's unified memory, which
-appears to handle file-backed pages far more expensively than anonymous ones. Reading the data is
-not the cost: copying the same mmap view into host memory takes 0.03–0.7 ms depending on the
-cache state, and a `pread()` 0.04–0.07 ms.
+The copy is slow whenever its source pages are not yet mapped in the process's page tables,
+whether they are in the page cache (E) or not (A). A clone fixes it (F), as well as pinned staging
+does (B, C), because its output is freshly written memory. A re-check on 2026-09-26 showed it is
+not file-backed versus anonymous memory: the same file pages copy in 0.021 ms once something has
+touched them through the mapping, and touching one byte per page before the copy is as fast as the
+clone. Why unmapped pages are so slow on GB10 is not verified. Reading the data is not the cost:
+copying the same mmap view into host memory takes 0.03–0.7 ms depending on the cache state, and a
+`pread()` 0.04–0.07 ms.
 
 The fix is `src/patch_moe_load_clone.py`. In `_load_w13` and `_load_w2`, when the source is a CPU
 tensor that is not pinned and the destination is not on the CPU, the copy now reads from

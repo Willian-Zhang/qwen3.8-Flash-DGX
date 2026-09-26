@@ -722,13 +722,13 @@ boot either way, warm or cold. Mounting it would have been cargo cult.
 
 Most of a boot used to be "Loading weights", and the cause was not the disk. vLLM copies each of
 the ~149k routed-expert tensors to the GPU on its own, straight from the memory-mapped checkpoint.
-On GB10 that copy costs ~1.7 ms per 800 KiB tensor when the source is a file-backed page, and
-~0.23 ms from ordinary memory. Patch 14 clones each tensor before the copy, which produces the
-same bytes and uses one transient tensor of scratch memory. With the compile cache reused as
-above, it takes startup from ~11 min to 4 min 32 s. Patches 15–18 remove most of the rest: small
-tensors are read with `pread` instead of mmap (never the PLE table), expert names are matched by
-index, `embed_tokens` / `lm_head` are copied in 64 MiB pieces, and the MTP drafter skips the
-tensors it doesn't need before reading them. Startup: 2 min 8 s.
+On GB10 that copy costs ~1.7 ms per 800 KiB tensor when the source pages have not been touched
+yet (cached or not), and ~0.23 ms from ordinary memory. Patch 14 clones each tensor before the
+copy, which produces the same bytes and uses one transient tensor of scratch memory. With the
+compile cache reused as above, it takes startup from ~11 min to 4 min 32 s. Patches 15–18 remove
+most of the rest: small tensors are read with `pread` instead of mmap (never the PLE table), expert
+names are matched by index, `embed_tokens` / `lm_head` are copied in 64 MiB pieces, and the MTP
+drafter skips the tensors it doesn't need before reading them. Startup: 2 min 8 s.
 
 | (DGX Spark, hybrid, NVIDIA checkpoint) | before | patch 14 | patches 14–18 |
 |---|---|---|---|
