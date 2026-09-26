@@ -25,9 +25,12 @@ Handoff notes. Goal: cut the ~9 min of "Loading weights" at every boot of `qwen3
 
 ## State at handoff
 
-- Image: patches 1–18 (`qwen38-flash-dgx:latest`), boot 2 min 8 s.
+- Image: `qwen38-flash-dgx:v0.30` (`Dockerfile.v0.30`, vLLM v0.30.0, patches 14–18 included) since
+  2026-09-26, 108 s to ready. The preview image (`qwen38-flash-dgx:latest`, patches 1–18) is kept for
+  rollback: `IMAGE=` and `COMPILE_CACHE=qwen38` in the env file.
 - Serving `nvidia/Qwen3.8-Flash-Next-NVFP4`, `MODE=hybrid` (snapshot `fc694b5…-fp8hybrid`), YaRN 500k,
-  MTP=2, `COMPILE_CACHE=qwen38` (docker volumes, reused: init engine ~119 s → ~33 s), port 8000.
+  MTP=2, `PREWARM=0`, `COMPILE_CACHE=qwen38v030` (docker volumes, reused: init engine 53 s on v0.30,
+  31 s on the preview), port 8000.
   Settings: `systemd/qwen38-flash.env`; unit: `systemd/qwen38-flash.service`.
 - Weights are served from the kc3000 NFS share first (`HF_HUB_DIRS`, NFS over RDMA, mounted `ro` at
   `/mnt/kc3000-nfs`), local `~/.cache/huggingface/hub` is the boot-time fallback (full copy kept).
