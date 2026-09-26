@@ -15,6 +15,9 @@ Handoff notes. Goal: cut the ~9 min of "Loading weights" at every boot of `qwen3
 - **Fixed by patch 14** (`src/patch_moe_load_clone.py`, `VLLM_LOAD_CLONE=0` disables): clone before
   the H2D copy in the FusedMoE loader. First boot with it: main load 541 → 150 s, MTP 46 → 32 s,
   startup ~11 min → 4 min 32 s, smoke test unchanged.
+- **Patches 15–18** (pread for small tensors, indexed expert-name matching, chunked embedding copy,
+  MTP name prefilter; see "Patches 15–17" below): main load 150 → 35.5 s, MTP 32 → 1.2 s, startup
+  4 min 32 s → **2 min 8 s**. Greedy probe identical; drafter counts identical with patch 18 on and off.
 
 ## State at handoff
 
@@ -25,7 +28,10 @@ Handoff notes. Goal: cut the ~9 min of "Loading weights" at every boot of `qwen3
 - Weights are served from the kc3000 NFS share first (`HF_HUB_DIRS`, NFS over RDMA, mounted `ro` at
   `/mnt/kc3000-nfs`), local `~/.cache/huggingface/hub` is the boot-time fallback (full copy kept).
 - Branch `spark-service` = `upstream/main` (blazux, 5be6637) + the systemd service, `HF_HUB_DIRS`
-  and patch 14. The LMCache experiment lives on its own branch, `lmcache`.
+  and patches 14–18 (pushed). Upstream: patch 14 merged as blazux#33; 15–18, ported to
+  `Dockerfile.v0.30` and boot-tested there, are blazux#34 (branch `load-patches-15-18`, worktree
+  `~/run/qwen-pr-load`). vLLM: vllm-project/vllm#58720 (patch 16), issue vllm-project/vllm#58726
+  (the mmap H2D path). The LMCache experiment lives on its own branch, `lmcache`.
 - `/mnt/models/gb10` (Synology NFS, 10 GbE) is **the backup mount — never delete anything there**.
   It holds a verified RadixArk checkpoint + hybrid (restored and sha-checked 2026-09-23); it is
   deliberately not in `HF_HUB_DIRS`.
@@ -344,6 +350,24 @@ Preview `Dockerfile` only (not `Dockerfile.v0.29`, not in the upstream PR yet).
   boot is a between-boots difference (likely the drafter's compiled graph, rebuilt once when
   patch 18 changed `mtp.py`; not verified). MTP load with the prefilter off: 7.0 s, on: 1.2 s.
 - Rollback image: `qwen38-flash-dgx:pre-patch18` (patches 14–17).
+
+### v0.30 port (09-25, image `qwen38-flash-dgx:v0.30-p18`, weights on local NVMe)
+
+The scripts apply to v0.30.0 unchanged, except 18: `mtp.py` moved to `qwen4_exp`, and its
+`load_weights` passes `mapper=mapper` (drops names only after the remap, so the kept set is the same).
+Same image, A/B via the four switches, own compile cache (`COMPILE_CACHE=qwen38v030`):
+
+| v0.30, local NVMe | patch 14 only | patches 14–18 (2 boots) |
+|---|---|---|
+| main load | 189.5 s | 97.4 / 99.5 s |
+| MTP load | 48.7 s | 1.2 / 1.2 s |
+| startup | 5 min 36 s | 3 min 17 s / 3 min 9 s |
+| KV pool | 700,000 | 543,939 / 539,393 |
+
+Greedy probe 5/5 texts and first-token logprobs identical between the two, drafter 872 / 592 on both,
+smoke test green. The preview image from the same local NVMe: 97.2 + 2.5 s, 2 min 57 s, so local
+NVMe (~1.46 GiB/s single stream) is what bounds the main load there; from NFS it is 33–35 s. The KV
+pool difference is unexplained (one unpatched boot; preview boots range 622k–760k).
 
 The new timeline: container start → EngineCore init 23 s, model construction + prewarm start 6 s,
 main load 35 s (the PLE prewarm runs inside it), MTP load 12 s, init engine 34 s, API
