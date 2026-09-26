@@ -18,7 +18,7 @@ Handoff notes. Goal: cut the ~9 min of "Loading weights" at every boot of `qwen3
 
 ## State at handoff
 
-- Image: patches 1–17 (`qwen38-flash-dgx:latest`), boot 2 min 13 s.
+- Image: patches 1–18 (`qwen38-flash-dgx:latest`), boot 2 min 8 s.
 - Serving `nvidia/Qwen3.8-Flash-Next-NVFP4`, `MODE=hybrid` (snapshot `fc694b5…-fp8hybrid`), YaRN 500k,
   MTP=2, `COMPILE_CACHE=qwen38` (docker volumes, reused: init engine ~119 s → ~33 s), port 8000.
   Settings: `systemd/qwen38-flash.env`; unit: `systemd/qwen38-flash.service`.
@@ -44,6 +44,7 @@ Handoff notes. Goal: cut the ~9 min of "Loading weights" at every boot of `qwen3
 | 09-24 07:04 | NFS, profiled (py-spy) | 541 + 46 s | 35 s (0.6) | ~11 min |
 | 09-24 07:34 | NFS, **patch 14** | **150 + 32 s** | 33 s (0.6) | **4 min 32 s** |
 | 09-24 12:54 | NFS, **patches 14–17** | **35 + 12 s** | 34 s (2.0) | **2 min 13 s** |
+| 09-24 13:41 | NFS, **patches 14–18** | **35 + 1.2 s** | 34 s (3.5) | **2 min 8 s** |
 
 Weight loading varies ±40 s boot to boot (upstream saw 464–554 s too). Measure the patch against
 the `Loading weights took` lines, not the total.
@@ -280,7 +281,7 @@ same checkpoint.
 a + b + c + d + e + g together would take the boot from ~4 min 32 s to roughly 2–2.5 min (estimate).
 The weight-load parts (a–e, f') are code patches in the repo's style; g is an env-file change.
 
-**Implemented: a, b, e** as patches 15, 16, 17 (below). c, d, f', g not yet.
+**Implemented: a, b, e** as patches 15, 16, 17, and **d** as patch 18 (below). c, f', g not yet.
 
 ## Patches 15–17 (implemented 2026-09-24)
 
@@ -289,6 +290,8 @@ The weight-load parts (a–e, f') are code patches in the repo's style; g is an 
 | 15 (a) | `src/patch_load_pread.py` | `VLLM_LOAD_PREAD=0` disables | `safetensors_weights_iterator`: tensors ≤ 64 MiB are `pread` into ordinary memory, storage tagged `_qwen38_anon`; > 64 MiB and `ngram_embedding.shard_*` stay mmap views. Wraps patch 14's `_qwen38_h2d_src` to skip the clone for tagged tensors (needs 14). |
 | 16 (b) | `src/patch_moe_name_index.py` | `VLLM_MOE_NAME_INDEX=0` | `RoutedExperts.load_weights` iterates only the mapping entries whose `weight_name` occurs in the tensor name (lookup at each `experts.` position, `{len: {name: [idx]}}`), original order, fused tensors cut at the first consecutive run like the original `break`. Full scan if an entry does not start with `experts.`. |
 | 17 (e) | `src/patch_embed_chunked_copy.py` | `VLLM_LOAD_EMBED_CHUNK=0` | `VocabParallelEmbedding.weight_loader`: CPU → GPU in 64 MiB row blocks, each cloned into ordinary memory first; direct copy for tagged, pinned, 0-d or shape-mismatched sources. |
+
+| 18 (d) | `src/patch_mtp_name_prefilter.py` | `VLLM_MTP_NAME_PREFILTER=0` | wraps `weight_utils.should_skip_weight` (the hook the iterator calls before reading each tensor) with an optional keep-filter; `Qwen3_8FlashNextMTP.load_weights` sets it to `_remap_mtp_weight_name(n) is not None` while it loads, unless the model has secondary weight sources (other name prefixes). |
 
 Preview `Dockerfile` only (not `Dockerfile.v0.29`, not in the upstream PR yet).
 
@@ -317,10 +320,30 @@ Preview `Dockerfile` only (not `Dockerfile.v0.29`, not in the upstream PR yet).
   the time the server is up — the case for f'.
 - Rollback images: `qwen38-flash-dgx:pre-patch15` (patch 14 only), `:pre-patch14`.
 
+### Validation of patch 18 (13:41 boot)
+
+- CPU test `src/test_mtp_prefilter_cpu.py` on the whole snapshot: inside the filter the iterator
+  yields exactly the index names `_remap_mtp_weight_name` maps (3,103: 3,101 MTP + `embed_tokens`
+  + `lm_head`), 296,742 skipped unread, 2.7 s for the 11 files; filter off again afterwards.
+- Boot: MTP load **12 → 1.21 s**, log `MTP name prefilter: 3103 tensors kept, 296742 skipped
+  before reading`; main 35.5 s; "Model loading took" 56 → 43 s; startup **2 min 8 s**; KV pool
+  630,303 tokens (inside the usual 625k–760k boot-to-boot range).
+- Greedy probe `post-p18` vs `pre-p18` (patches 14–17 boot): all 5 texts and first-token logprobs
+  identical. Smoke test: deterministic, prefix-cache hit, 35.4 tok/s decode, 1,785 tok/s cold
+  prefill (single sample; cold prefill depends on the PLE page cache, 2,034 on the patch 14 boot).
+- Drafter check (the greedy probe cannot catch a bad drafter: the target verifies every token):
+  `vllm:spec_decode_num_{draft,accepted}_tokens_total` around one solo probe. This boot, three runs:
+  **1,208 drafted / 864 accepted every time**. Previous boot (patches 14–17): 1,210 / 863. By
+  construction the drafter gets the same tensors in the same order (the filter only removes names
+  it would drop), and a missing tensor would collapse acceptance, not move it by one token. The
+  cross-boot repeatability of the drafter was never measured, so the 2-token difference is not
+  attributed yet; an A/B boot with `VLLM_MTP_NAME_PREFILTER=0` on the same image would settle it.
+- Rollback image: `qwen38-flash-dgx:pre-patch18` (patches 14–17).
+
 The new timeline: container start → EngineCore init 23 s, model construction + prewarm start 6 s,
 main load 35 s (the PLE prewarm runs inside it), MTP load 12 s, init engine 34 s, API
-multimodal warmup 14 s, rest ~9 s. Remaining candidates: c (~2–3 s now that e is in), d (the MTP
-pass still reads the whole checkpoint), f' (page cache), g (~20 s, config).
+multimodal warmup 14 s, rest ~9 s. After patch 18 the MTP load is 1.2 s. Remaining candidates: c
+(< 1 s now that e and d are in), f' (page cache, first-request speed), g (~20 s, config).
 
 ## Rerunning the benchmark
 
