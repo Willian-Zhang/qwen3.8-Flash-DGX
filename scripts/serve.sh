@@ -20,8 +20,6 @@
 #   DET_TOPK=1        1 = deterministic QSA top-k KERNEL (@jschmied, vllm#55122): identical output at
 #                     temperature 0 at no prefill cost. The default.
 #   EXACT_TOPK=0      1 = exact torch.topk fallback (also deterministic, but -20-40% long prefill); wins over DET_TOPK
-#   PAD_M4=0          1 = pad M%4 in the blockwise-fp8 GEMM (@jschmied). Hybrid mode only; a no-op with
-#                     PREFIX_CACHE=1 (chunks are 1600-aligned), about -40% TTFT at 8k with PREFIX_CACHE=0
 #   DRAFT_VOCAB=1     1 = the MTP drafter scores only the 65,536 most frequent tokens (+20% decode, same
 #                     tournament score); 0 = full vocabulary; a path = your own ids.npy (tools/build_draft_vocab.py)
 #   MADVISE=random    madvise on the mmapped PLE table: random (default; no readahead, cleaner page cache) or normal
@@ -56,14 +54,11 @@
 #                     boots. Unset (default) = inside the container, which this script recreates
 #                     every time, so they are rebuilt on every boot (80 s of init engine, see
 #                     README). A bare name becomes docker volumes, an absolute path binds dirs
-#   IMAGE=qwen38-flash-dgx   MODEL=nvidia/Qwen3.8-Flash-Next-NVFP4   (RadixArk/Qwen3.8-Flash-Next-NVFP4 still supported: MODEL=...)
-#   BASE=             preview|v0.29|v0.30 — normally read from the image label (Dockerfile vs Dockerfile.v0.29/.v0.30).
-#                     On v0.29: KV_DTYPE must stay auto (fp8 KV not ported), PAD_M4 is a no-op.
-#                     On v0.30: KV_DTYPE=fp8_e4m3 works in images labelled qwen38.fp8kv (Dockerfile.v0.30), PAD_M4 is a no-op.
+#   IMAGE=qwen38-flash-dgx:v0.30   MODEL=nvidia/Qwen3.8-Flash-Next-NVFP4   (RadixArk/Qwen3.8-Flash-Next-NVFP4 still supported: MODEL=...)
 set -euo pipefail
 
 NAME="${NAME:-qwen38-flash}"
-IMAGE="${IMAGE:-qwen38-flash-dgx}"
+IMAGE="${IMAGE:-qwen38-flash-dgx:v0.30}"
 MODEL="${MODEL:-nvidia/Qwen3.8-Flash-Next-NVFP4}"   # default since 2026-09-14; see README "Checkpoints"
 SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-qwen3.8-flash-next}"
 HF_CACHE="${HF_CACHE:-$HOME/.cache/huggingface}"
@@ -71,7 +66,6 @@ MODE="${MODE:-nvfp4}"
 PREFIX_CACHE="${PREFIX_CACHE:-1}"
 DET_TOPK="${DET_TOPK:-1}"
 EXACT_TOPK="${EXACT_TOPK:-0}"
-PAD_M4="${PAD_M4:-0}"
 DRAFT_VOCAB="${DRAFT_VOCAB:-1}"
 MADVISE="${MADVISE:-random}"
 FAST_ROWS="${FAST_ROWS:-0}"
@@ -183,34 +177,19 @@ if [ "$EFFORT_ALIAS" = 1 ]; then
   fi
 fi
 
-# The PLE gather is a CPU op + a pageable host->device copy: it MUST run outside
-# CUDA graphs. We declare it a splitting op and use PIECEWISE capture (never FULL*).
-# The splitting-op names depend on the base image: the preview names the model qwen3_8_flash_next and
-# our PLE op is ple_mmap_lookup; vLLM >= 0.29 names it qwen4_exp and the op is ple_mmap_lookup_ids;
-# v0.30 dropped the qwen4_exp_compute_ple_ngram_ids op (hashing is a Triton kernel inside the graph).
-# Both Dockerfiles stamp a label so this picks the right list (BASE=preview|v0.29 overrides).
-BASE="${BASE:-$(docker image inspect -f '{{index .Config.Labels "qwen38.base"}}' "$IMAGE" 2>/dev/null || true)}"
-# Images carrying qwen38.fp8kv have patch 7 (fp8 KV on the QSA path) built in;
-# only those accept KV_DTYPE=fp8_e4m3 on a release base (see the gate below).
-FP8KV="$(docker image inspect -f '{{index .Config.Labels "qwen38.fp8kv"}}' "$IMAGE" 2>/dev/null || true)"
-if [ "$BASE" = "v0.30" ]; then
-  # v0.30 defaults (CompilationConfig._attention_ops) + the two kv_cache_update ops vLLM appends when the
-  # list is left unset + our PLE gather. The PLE hashing is a plain Triton kernel now (no split op).
-  SPLIT='["vllm::unified_attention_with_output","vllm::unified_mla_attention_with_output","vllm::mamba_mixer2","vllm::mamba_mixer","vllm::short_conv","vllm::qwen4_exp_ple_short_conv","vllm::qwen4_exp_qsa_with_output","vllm::linear_attention","vllm::qwen_gdn_attention_core","vllm::qwen_gdn_attention_core_fused_norm_packed","vllm::gdn_attention_core_xpu","vllm::olmo_hybrid_gdn_full_forward","vllm::sparse_attn_indexer","vllm::rocm_aiter_sparse_attn_indexer","vllm::deepseek_v4_attention","vllm::hpc_rope_norm_forward","vllm::unified_kv_cache_update","vllm::unified_mla_kv_cache_update","vllm::ple_mmap_lookup_ids"]'
-elif [ "$BASE" = "v0.29" ]; then
-  SPLIT='["vllm::unified_attention_with_output","vllm::unified_mla_attention_with_output","vllm::mamba_mixer2","vllm::mamba_mixer","vllm::short_conv","vllm::qwen4_exp_compute_ple_ngram_ids","vllm::qwen4_exp_ple_short_conv","vllm::qwen4_exp_qsa_with_output","vllm::linear_attention","vllm::qwen_gdn_attention_core","vllm::qwen_gdn_attention_core_fused_norm_packed","vllm::sparse_attn_indexer","vllm::ple_mmap_lookup_ids"]'
-else
-  SPLIT='["vllm::unified_attention_with_output","vllm::unified_mla_attention_with_output","vllm::mamba_mixer2","vllm::mamba_mixer","vllm::short_conv","vllm::qwen3_8_flash_next_ple_short_conv","vllm::qwen3_8_flash_next_qsa_with_output","vllm::linear_attention","vllm::qwen_gdn_attention_core","vllm::qwen_gdn_attention_core_fused_norm_packed","vllm::sparse_attn_indexer","vllm::ple_mmap_lookup"]'
+# The image must be a build of this repo's Dockerfile (LABEL qwen38.base=v0.30). An older preview or
+# v0.29 build under the same name has different op names and patches: refuse it rather than half-work.
+BASE="$(docker image inspect -f '{{index .Config.Labels "qwen38.base"}}' "$IMAGE" 2>/dev/null || true)"
+if [ "$BASE" != "v0.30" ]; then
+  echo "!! $IMAGE is ${BASE:+a '$BASE'-base build, }${BASE:-missing or unlabeled}; this recipe needs the v0.30 image: docker build -t $IMAGE .  (or ./flash setup)"; exit 1
 fi
-# Options an image may not carry: patch 7 (fp8 KV on the QSA path) ships only in images labelled
-# qwen38.fp8kv, and patch 9 (M%4 padding) is unnecessary on the release bases (vllm#52775 is in the
-# release) so those images have no such kernel.
-if [ "$BASE" = "v0.29" ] || [ "$BASE" = "v0.30" ]; then
-  if [ "$KV_DTYPE" != auto ] && [ -z "$FP8KV" ]; then
-    echo "!! KV_DTYPE=$KV_DTYPE: the fp8 KV cache patch is not in $IMAGE (no qwen38.fp8kv label) — build it with Dockerfile.v0.30 (patch 7) or use the preview image (Dockerfile) for fp8 KV"; exit 1
-  fi
-  [ "$PAD_M4" != 0 ] && echo "!! PAD_M4 has no effect on the $BASE base (vllm#52775 fixed the fp8 GEMM there); ignoring" && PAD_M4=0
-fi
+
+# The PLE gather is a CPU op + a pageable host->device copy: it MUST run outside CUDA graphs.
+# On v0.30 the piecewise graphs are breakable captures and the gather ends a segment by itself
+# (src/vllm_ple_mmap.py); the splitting-op list below only matters on the torch.compile/FX path
+# (VLLM_USE_BREAKABLE_CUDAGRAPH=0). It is v0.30's default list (CompilationConfig._attention_ops)
+# + the two kv_cache_update ops vLLM appends when the list is left unset + our PLE gather.
+SPLIT='["vllm::unified_attention_with_output","vllm::unified_mla_attention_with_output","vllm::mamba_mixer2","vllm::mamba_mixer","vllm::short_conv","vllm::qwen4_exp_ple_short_conv","vllm::qwen4_exp_qsa_with_output","vllm::linear_attention","vllm::qwen_gdn_attention_core","vllm::qwen_gdn_attention_core_fused_norm_packed","vllm::gdn_attention_core_xpu","vllm::olmo_hybrid_gdn_full_forward","vllm::sparse_attn_indexer","vllm::rocm_aiter_sparse_attn_indexer","vllm::deepseek_v4_attention","vllm::hpc_rope_norm_forward","vllm::unified_kv_cache_update","vllm::unified_mla_kv_cache_update","vllm::ple_mmap_lookup_ids"]'
 CC="${CC:--cc.cudagraph_mode=PIECEWISE -cc.splitting_ops=$SPLIT}"
 
 # YaRN (Qwen's published recipe) to go past the native 262144.
@@ -281,7 +260,7 @@ docker run -d --name "$NAME" --restart unless-stopped \
   "${PROM_ARGS[@]}" \
   "${CACHE_MNT[@]}" "${TEMPLATE_MNT[@]}" \
   -e VLLM_PLE_MMAP=1 -e VLLM_PLE_MMAP_WORKERS="${WORKERS:-32}" -e VLLM_PLE_MMAP_PREWARM="$PREWARM" \
-  -e VLLM_QSA_EXACT_TOPK="$EXACT_TOPK" "${DETENV[@]}" -e VLLM_FP8_PAD_M4="$PAD_M4" \
+  -e VLLM_QSA_EXACT_TOPK="$EXACT_TOPK" "${DETENV[@]}" \
   -e VLLM_USE_FLASHINFER_SAMPLER=1 -e VLLM_ALLOW_LONG_MAX_MODEL_LEN="$ALLOW_LONG" \
   "${HYBRID_ENV[@]}" \
   "$IMAGE" \
@@ -311,6 +290,6 @@ case "$STATE" in
     ;;
 esac
 
-echo ">> $NAME starting on :$PORT (model '$SERVED_MODEL_NAME', mode=$MODE, ctx $CTX, yarn=$YARN, mtp=$MTP, seqs=$SEQS, prefix_cache=$PREFIX_CACHE, det_topk=$DET_TOPK, exact_topk=$EXACT_TOPK, pad_m4=$PAD_M4, draft_vocab=$DRAFT_VOCAB, madvise=$MADVISE, fast_rows=$FAST_ROWS, effort_alias=$EFFORT_ALIAS_STATE${COMPILE_CACHE:+, compile_cache=$COMPILE_CACHE})"
-echo ">> first boot loads ~75 GiB of weights (~3-4 min with patches 14-18, 8-13 min on older images). Follow:  docker logs -f $NAME"
+echo ">> $NAME starting on :$PORT (model '$SERVED_MODEL_NAME', mode=$MODE, ctx $CTX, yarn=$YARN, mtp=$MTP, seqs=$SEQS, prefix_cache=$PREFIX_CACHE, det_topk=$DET_TOPK, exact_topk=$EXACT_TOPK, draft_vocab=$DRAFT_VOCAB, madvise=$MADVISE, fast_rows=$FAST_ROWS, effort_alias=$EFFORT_ALIAS_STATE${COMPILE_CACHE:+, compile_cache=$COMPILE_CACHE})"
+echo ">> first boot loads ~75 GiB of weights (~3-4 min). Follow:  docker logs -f $NAME"
 echo ">> ready when the log says 'Application startup complete'. Then: scripts/smoke-test.sh"

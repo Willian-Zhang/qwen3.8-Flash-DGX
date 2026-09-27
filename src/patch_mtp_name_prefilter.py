@@ -2,7 +2,7 @@
 """MTP drafter: skip non-MTP tensors before they are read (VLLM_MTP_NAME_PREFILTER=1, default on).
 
 The drafter is loaded as a second model from the same checkpoint. Its loader walks all 299,845
-tensors of the 11 files and Qwen3_8FlashNextMTP.load_weights keeps the ~3,100 whose name
+tensors of the 11 files and the drafter's load_weights keeps the ~3,100 whose name
 _remap_mtp_weight_name maps, discarding the rest after they were created; with patch 15 that
 means after they were read (~70 GiB). vLLM's safetensors iterator already asks
 weight_utils.should_skip_weight(name, ...) before reading each tensor; this wraps it with an
@@ -17,10 +17,8 @@ import sys
 
 SP = sys.argv[1]
 WU = f"{SP}/vllm/model_executor/model_loader/weight_utils.py"
-# preview / v0.29 layout, then v0.30 (package renamed to qwen4_exp)
-MTPS = [f"{SP}/vllm/models/{p}/nvidia/mtp.py" for p in ("qwen3_8_flash_next", "qwen4_exp")]
-MTP = next((p for p in MTPS if os.path.exists(p)), None)
-assert MTP, f"mtp.py not found: {MTPS}"
+MTP = f"{SP}/vllm/models/qwen4_exp/nvidia/mtp.py"
+assert os.path.exists(MTP), f"mtp.py not found: {MTP}"
 
 s = open(WU).read()
 assert "from vllm.model_executor.model_loader.ep_weight_filter import (\n    should_skip_weight,\n)" in s

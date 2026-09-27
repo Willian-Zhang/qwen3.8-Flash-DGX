@@ -2,7 +2,7 @@
 """CPU checks for patches 15 (pread loader) and 17 (chunked embedding copy); no GPU needed.
 
     docker run --rm -v "$PWD/src:/t" -w /t -v /path/to/snapshot:/snap:ro \\
-      --entrypoint python3 qwen38-flash-dgx test_load_patches_cpu.py /snap/model-00010-of-00010.safetensors ...
+      --entrypoint python3 qwen38-flash-dgx:v0.30 test_load_patches_cpu.py /snap/model-00010-of-00010.safetensors ...
 
 Patch 15: for each file, the default iterator with VLLM_LOAD_PREAD on must yield the same names,
 dtypes, shapes and bytes as with it off; tensors <= 64 MiB come back tagged (read into ordinary

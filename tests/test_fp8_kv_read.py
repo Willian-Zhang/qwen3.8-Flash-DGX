@@ -7,7 +7,7 @@ reference path loads, so the attention output is bit-identical (max abs diff
 0.0), and that the fp8 cache spec allocates exactly half the bf16 page size.
 
     docker run --rm --gpus all -v "$PWD:/t" -w /t \
-        --entrypoint python3 qwen38-flash-dgx:v0.30fp8 -m pytest tests/test_fp8_kv_read.py -v
+        --entrypoint python3 qwen38-flash-dgx:v0.30 -m pytest tests/test_fp8_kv_read.py -v
 
 Skips cleanly without a GPU or against an image without patch 7. No model
 load: a few small tensors only.
@@ -21,7 +21,7 @@ pytest.importorskip("triton")
 
 vllm_qsa = pytest.importorskip(
     "vllm.models.qwen4_exp.nvidia.ops.qsa",
-    reason="module qwen4_exp not found (vLLM < 0.29 layout)",
+    reason="module qwen4_exp not found (not the vLLM v0.30 image)",
 )
 if not torch.cuda.is_available():
     pytest.skip("no GPU", allow_module_level=True)
@@ -29,7 +29,7 @@ if not torch.cuda.is_available():
 qsa_sparse_paged_attention = vllm_qsa.qsa_sparse_paged_attention
 
 # Patch 7 adds k_scale/v_scale to the public wrapper; without them the image
-# carries no fp8 read path (src/patch_qsa_fp8_kv_v030.py not applied).
+# carries no fp8 read path (src/patch_qsa_fp8_kv.py not applied).
 _params = inspect.signature(qsa_sparse_paged_attention).parameters
 if "k_scale" not in _params:
     pytest.skip(

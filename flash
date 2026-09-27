@@ -38,9 +38,8 @@ WARNINGS=0; FAILURES=0
 
 usage() { sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; }
 
-# A profile is a plain KEY=VALUE env file. Two comment lines carry metadata:
+# A profile is a plain KEY=VALUE env file. One comment line carries metadata:
 #   # desc: one line shown by `flash profiles`
-#   # base: preview | v0.29 | v0.30   (which Dockerfile builds the image it expects)
 profile_file() {
   local p="$1"
   [ -f "$PROFILES_DIR/$p.env" ] || die "unknown profile '$p' — see: ./flash profiles"
@@ -72,15 +71,12 @@ load_profile() {
   export NAME="${NAME:-qwen38-flash}" PORT="${PORT:-18300}" MODE="${MODE:-nvfp4}"
   export MODEL="${MODEL:-$MODEL_DEFAULT}" HF_CACHE="${HF_CACHE:-$HOME/.cache/huggingface}"
   export GPU_MEM="${GPU_MEM:-0.80}" KV_DTYPE="${KV_DTYPE:-auto}"
-  BASE_EXPECTED="$(profile_meta "$file" base)"; BASE_EXPECTED="${BASE_EXPECTED:-preview}"
-  if [ "$BASE_EXPECTED" = v0.30 ]; then
-    export IMAGE="${IMAGE:-qwen38-flash-dgx:v0.30}"; DOCKERFILE="Dockerfile.v0.30"
-  elif [ "$BASE_EXPECTED" = v0.29 ]; then
-    export IMAGE="${IMAGE:-qwen38-flash-dgx:v0.29}"; DOCKERFILE="Dockerfile.v0.29"
-  else
-    export IMAGE="${IMAGE:-qwen38-flash-dgx}"; DOCKERFILE="Dockerfile"
-  fi
+  export IMAGE="${IMAGE:-qwen38-flash-dgx:v0.30}"
 }
+
+# The image carries LABEL qwen38.base=v0.30. Anything else (an older preview or v0.29 build under
+# the same name, or an unlabeled one) is rebuilt by setup and refused by serve.
+BASE_EXPECTED=v0.30
 
 # Same snapshot resolution as scripts/serve.sh (refs/main first).
 snapshot_dir() {
@@ -151,11 +147,14 @@ last_profile()     { cat "$STATE_DIR/profile.${NAME:-qwen38-flash}" 2>/dev/null 
 
 # ---------------------------------------------------------------- commands
 cmd_profiles() {
-  printf '%-12s %-7s %s\n' PROFILE BASE WHAT
+  printf '%-12s %s\n' PROFILE WHAT
+  local first=1
   for f in "$PROFILES_DIR/default.env" "$PROFILES_DIR"/*.env; do
     local p; p="$(basename "$f" .env)"
-    [ "$p" = default ] && [ "$f" != "$PROFILES_DIR/default.env" ] && continue
-    printf '%-12s %-7s %s\n' "$p" "$(profile_meta "$f" base | sed 's/^$/preview/')" "$(profile_meta "$f" desc)"
+    # default first, then the rest in glob order without default again
+    [ "$p" = default ] && [ "$first" = 0 ] && continue
+    first=0
+    printf '%-12s %s\n' "$p" "$(profile_meta "$f" desc)"
   done
   printf '\nserve one:  ./flash serve <profile>        override anything:  ./flash serve default MTP=3 PORT=18301\n'
   printf 'a profile is a plain env file in profiles/ — copy one to make your own.\n'
@@ -200,8 +199,8 @@ cmd_doctor() {
   if [ "$docker_ok" != 1 ]; then warn "$IMAGE not checked: no docker access"
   elif have_image; then
     local b; b="$(image_base)"
-    if [ -n "$b" ] && [ "$b" != "$BASE_EXPECTED" ]; then warn "$IMAGE is built from the '$b' base but profile '$profile' expects '$BASE_EXPECTED' — rebuild: ./flash setup $profile"; else ok "$IMAGE present (base: ${b:-unlabeled, pre-2026-09-11 build})"; fi
-  else info "$IMAGE not built yet — ./flash setup $profile will (about 1 min on the preview base, plus the pull)"; fi
+    if [ "$b" != "$BASE_EXPECTED" ]; then warn "$IMAGE is an old '${b:-unlabeled}' build, this recipe needs the $BASE_EXPECTED base — rebuild: ./flash setup $profile"; else ok "$IMAGE present (base $b)"; fi
+  else info "$IMAGE not built yet — ./flash setup $profile will (a few minutes, plus the pull)"; fi
 
   step "weights ($MODEL in $HF_CACHE)"
   mkdir -p "$HF_CACHE" 2>/dev/null || true
@@ -228,7 +227,6 @@ cmd_doctor() {
   if [ -n "${HF_TOKEN:-}${HUGGING_FACE_HUB_TOKEN:-}" ]; then ok "HF token in the environment"; else info "no HF_TOKEN: downloads work but the Hub may rate-limit; export HF_TOKEN=... to be safe"; fi
 
   step "profile sanity"
-  if [ "$BASE_EXPECTED" = v0.29 ] && [ "$KV_DTYPE" != auto ]; then fail "KV_DTYPE=$KV_DTYPE is not available on the $BASE_EXPECTED base (fp8 KV not ported) — use a preview-base profile"; fi
   if [ "${YARN:-0}" = 0 ] && [ "${CTX:-262144}" -gt 262144 ]; then fail "CTX=$CTX above the native 262144 needs YARN=1"; fi
   if [ "$KV_DTYPE" = auto ] && [ "${CTX:-262144}" -gt 500000 ]; then warn "CTX=$CTX in bf16 KV: 500k is the validated ceiling (800k got OOM-killed on a long prefill); 1M needs KV_DTYPE=fp8_e4m3"; fi
   [ "$FAILURES" -eq 0 ] && [ "$WARNINGS" -eq 0 ] && ok "profile looks fine"
@@ -242,12 +240,12 @@ cmd_doctor() {
 cmd_setup() {
   local profile="${1:-default}"; shift || true
   need_profile "$profile"; load_profile "$PROFILE_FILE" "$@"
-  echo "setup — profile '$profile' (image $IMAGE from $DOCKERFILE, mode $MODE). Every step is skipped when already done."
+  echo "setup — profile '$profile' (image $IMAGE, mode $MODE). Every step is skipped when already done."
 
   step "1/4 image $IMAGE"
   if have_image && [ "$(image_base)" = "$BASE_EXPECTED" ]; then ok "already built (base $BASE_EXPECTED)"; else
-    [ -f "$HERE/$DOCKERFILE" ] || die "$DOCKERFILE not found in $HERE"
-    run docker build -f "$HERE/$DOCKERFILE" -t "$IMAGE" "$HERE"; ok "built"; fi
+    [ -f "$HERE/Dockerfile" ] || die "Dockerfile not found in $HERE"
+    run docker build -t "$IMAGE" "$HERE"; ok "built"; fi
 
   step "2/4 weights ($MODEL, ~124 GiB, resumable)"
   if have_weights; then ok "already downloaded: $(snapshot_dir)"; else
@@ -281,9 +279,9 @@ cmd_serve() {
     local stale; stale="$(hybrid_stale)"; [ -z "$stale" ] || die "hybrid layout is missing $stale (prepared from an incomplete download, issue #17) — run scripts/prepare-hybrid.sh again, it repairs it" ;; esac
   [ "$MODE" = hybrid-mtp ] && { case "$MODEL" in RadixArk/*) ;; *) die "MODE=hybrid-mtp (the NVFP4 draft-experts graft) only applies to RadixArk/Qwen3.8-Flash-Next-NVFP4, whose MTP drafter is bf16; $MODEL already ships an fp8 drafter — use MODE=hybrid" ;; esac; have_graft || die "MTP graft not prepared — run: ./flash setup $profile"; }
   local b; b="$(image_base)"
-  [ -n "$b" ] && [ "$b" != "$BASE_EXPECTED" ] && die "$IMAGE is a '$b'-base image, profile '$profile' expects '$BASE_EXPECTED' — run: ./flash setup $profile"
+  [ "$b" != "$BASE_EXPECTED" ] && die "$IMAGE is an old '${b:-unlabeled}' build, this recipe needs the $BASE_EXPECTED base — run: ./flash setup $profile"
   if [ "$(container_state)" = running ]; then info "$NAME is running and will be replaced"; fi
-  if [ "$DRY" = 1 ]; then info "dry run: would exec scripts/serve.sh with the environment above"; env | grep -E '^(MODE|IMAGE|NAME|SERVED_MODEL_NAME|PORT|CTX|YARN|MTP|SEQS|GPU_MEM|KV_DTYPE|PREFIX_CACHE|DET_TOPK|EXACT_TOPK|PAD_M4|DRAFT_VOCAB|MADVISE|FAST_ROWS|EFFORT_ALIAS|PREWARM|COMPILE_CACHE|EXTRA|BASE|LOG_REQUESTS|WORKERS)=' | sort | sed 's/^/    /'; return 0; fi
+  if [ "$DRY" = 1 ]; then info "dry run: would exec scripts/serve.sh with the environment above"; env | grep -E '^(MODE|IMAGE|NAME|SERVED_MODEL_NAME|PORT|CTX|YARN|MTP|SEQS|GPU_MEM|KV_DTYPE|PREFIX_CACHE|DET_TOPK|EXACT_TOPK|DRAFT_VOCAB|MADVISE|FAST_ROWS|EFFORT_ALIAS|PREWARM|COMPILE_CACHE|EXTRA|LOG_REQUESTS|WORKERS)=' | sort | sed 's/^/    /'; return 0; fi
   remember_profile "$profile"
   exec "$HERE/scripts/serve.sh"
 }

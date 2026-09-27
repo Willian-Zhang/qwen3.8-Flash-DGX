@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """Env-gated switch of the QSA block top-k to the deterministic kernel (@jschmied, vllm#55122),
 built standalone as ``_C_det`` (kernel-det/build_det.py). Same contract as jschmied's
-tools/determinism/qsadet_patch.py, extended to the v0.30 layout where the top-k lives in
+tools/determinism/qsadet_patch.py, on the layout where the top-k lives in
 ``ops/qsa_indexer.py::_topk`` (shared by the prefill and decode indexers after vllm#54513).
   VLLM_QSA_DET_TOPK=1     use torch.ops._C_det.persistent_topk instead of _C.persistent_topk
   VLLM_QSA_DET_LIB=<path> the .so (default /opt/llm/kernel-det/_C_det.so)
 Inert without VLLM_QSA_DET_TOPK. VLLM_QSA_EXACT_TOPK=1 wins when both are set (it replaces the call).
-Usage: python3 patch_qsadet.py <qsa.py or qsa_indexer.py> [off]
+Usage: python3 patch_qsadet.py <qsa_indexer.py> [off]
 """
 import sys
 
 TARGET = sys.argv[1]
 # (indent, function that owns the dispatch and carries the _qsadet_loaded flag)
-LAYOUTS = [("        ", "qsa_select_paged_tokens"), ("    ", "_topk")]
+LAYOUTS = [("    ", "_topk")]
 
 
 def _blocks(indent, holder):

@@ -2,7 +2,7 @@
 """CPU unit test for patch_moe_name_index.py: the indexed candidates must be exactly the mapping
 entries the original loop in RoutedExperts.load_weights visits, in the same order (no GPU needed).
 
-    docker run --rm -v "$PWD/src:/t" -w /t --entrypoint python3 qwen38-flash-dgx test_moe_name_index_cpu.py
+    docker run --rm -v "$PWD/src:/t" -w /t --entrypoint python3 qwen38-flash-dgx:v0.30 test_moe_name_index_cpu.py
 """
 import os
 import time

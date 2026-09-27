@@ -9,10 +9,8 @@ Default behaviour unchanged."""
 import sys
 F = sys.argv[1]
 src = open(F).read()
-# v0.29 (ops/qsa.py, one chunked call site) and v0.30 (ops/qsa_indexer.py, the `_topk` helper
-# shared by the prefill and decode paths after vllm#54513) spell the call differently.
-CALL_V029 = "        topk_op(logits, visible_blocks, blocks, topk_workspace, block_topk, columns)\n"
-CALL_V030 = (
+# The `_topk` helper in ops/qsa_indexer.py, shared by the prefill and decode paths (vllm#54513).
+CALL = (
     "    topk_op(\n"
     "        logits,\n"
     "        visible_blocks,\n"
@@ -22,29 +20,17 @@ CALL_V030 = (
     "        logits.shape[1],\n"
     "    )\n"
 )
-if src.count(CALL_V029) == 1:
-    src = src.replace(CALL_V029,
-        "        if _QSA_TOPK_MODE == \"1\":\n"
-        "            _qsa_exact_topk(logits, visible_blocks, blocks, block_topk, columns)\n"
-        "        elif _QSA_TOPK_MODE == \"fill\":\n"
-        "            _qsa_mask_invisible_(logits, visible_blocks, columns)\n"
-        "            topk_op(logits, visible_blocks, blocks, topk_workspace, block_topk, columns)\n"
-        "        else:\n"
-        "            topk_op(logits, visible_blocks, blocks, topk_workspace, block_topk, columns)\n")
-    print("  exact top-k: v0.29 call site patched")
-elif src.count(CALL_V030) == 1:
-    src = src.replace(CALL_V030,
-        "    columns = logits.shape[1]\n"
-        "    if _QSA_TOPK_MODE == \"1\":\n"
-        "        _qsa_exact_topk(logits, visible_blocks, block_indices, block_topk, columns)\n"
-        "    elif _QSA_TOPK_MODE == \"fill\":\n"
-        "        _qsa_mask_invisible_(logits, visible_blocks, columns)\n"
-        "        topk_op(logits, visible_blocks, block_indices, topk_workspace, block_topk, columns)\n"
-        "    else:\n"
-        "        topk_op(logits, visible_blocks, block_indices, topk_workspace, block_topk, columns)\n")
-    print("  exact top-k: v0.30 call site patched")
-else:
-    raise SystemExit("topk call site not found exactly once (neither v0.29 nor v0.30 spelling)")
+if src.count(CALL) != 1:
+    raise SystemExit("topk call site not found exactly once in the QSA indexer")
+src = src.replace(CALL,
+    "    columns = logits.shape[1]\n"
+    "    if _QSA_TOPK_MODE == \"1\":\n"
+    "        _qsa_exact_topk(logits, visible_blocks, block_indices, block_topk, columns)\n"
+    "    elif _QSA_TOPK_MODE == \"fill\":\n"
+    "        _qsa_mask_invisible_(logits, visible_blocks, columns)\n"
+    "        topk_op(logits, visible_blocks, block_indices, topk_workspace, block_topk, columns)\n"
+    "    else:\n"
+    "        topk_op(logits, visible_blocks, block_indices, topk_workspace, block_topk, columns)\n")
 if "\nimport os\n" not in src:
     src = src.replace("import torch\n", "import os\nimport torch\n", 1)
 src += '''
@@ -88,4 +74,4 @@ def _qsa_exact_topk(logits, visible_blocks, blocks, block_topk, columns):
 '''
 open(F, "w").write(src)
 import ast; ast.parse(src)
-print("qsa.py: top-k variants (1|fill) added OK")
+print("qsa_indexer.py: top-k variants (1|fill) added OK")

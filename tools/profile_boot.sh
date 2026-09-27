@@ -6,7 +6,7 @@
 # The container must run with ptrace allowed and py-spy mounted: add
 #   --cap-add=SYS_PTRACE -v $HOME/run/qwen-load-profile:/prof
 # to the docker run line in scripts/serve.sh, with py-spy installed there once:
-#   docker run --rm -v ~/run/qwen-load-profile:/out --entrypoint pip qwen38-flash-dgx install --target /out/pyspy py-spy
+#   docker run --rm -v ~/run/qwen-load-profile:/out --entrypoint pip qwen38-flash-dgx:v0.30 install --target /out/pyspy py-spy
 # Start this script first, then start the server: it waits for a container started after it.
 set -u
 NAME="${NAME:-qwen38-flash}"

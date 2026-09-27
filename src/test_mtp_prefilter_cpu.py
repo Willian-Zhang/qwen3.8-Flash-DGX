@@ -2,10 +2,10 @@
 """CPU check for patch 18 (MTP name prefilter) against a real checkpoint; no GPU needed.
 
     docker run --rm -v "$PWD/src:/t" -w /t -v /path/to/huggingface_hub:/hub:ro \\
-      --entrypoint python3 qwen38-flash-dgx test_mtp_prefilter_cpu.py /hub/models--.../snapshots/<rev>
+      --entrypoint python3 qwen38-flash-dgx:v0.30 test_mtp_prefilter_cpu.py /hub/models--.../snapshots/<rev>
 
 Runs vLLM's safetensors iterator over every file of the snapshot inside the drafter's prefilter
-and checks that it yields exactly the names Qwen3_8FlashNextMTP.load_weights would keep from the
+and checks that it yields exactly the names the drafter's load_weights would keep from the
 unfiltered stream (the checkpoint index names that _remap_mtp_weight_name maps), and that the
 filter is off again afterwards.
 """
@@ -16,10 +16,7 @@ import sys
 import time
 
 import vllm.model_executor.model_loader.weight_utils as wu
-try:
-    from vllm.models.qwen3_8_flash_next.nvidia.mtp import _remap_mtp_weight_name
-except ImportError:  # v0.30: package renamed
-    from vllm.models.qwen4_exp.nvidia.mtp import _remap_mtp_weight_name
+from vllm.models.qwen4_exp.nvidia.mtp import _remap_mtp_weight_name
 
 snap = sys.argv[1]
 names = json.load(open(os.path.join(snap, "model.safetensors.index.json")))["weight_map"]
