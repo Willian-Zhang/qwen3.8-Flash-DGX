@@ -78,8 +78,9 @@ switch the parser into a tool preamble and discard subsequent text, including a
 final answer after `</think>`. The parser now buffers the marker and preserves it as text when ordinary prose
 follows, while recognizing a function-header prefix (`<function=`) as a tool call.
 Valid calls and existing empty-wrapper/end-of-stream handling are retained.
-The fix is enabled for the `qwen3` parser; derived parser configurations retain
-their existing behavior.
+The fix is enabled for the `qwen3` parser configuration, which is what
+`--tool-call-parser qwen3_coder` (the flag `scripts/serve.sh` uses) and
+`qwen3_xml` both run; derived parser configurations retain their existing behavior.
 
 That fix covers a marker followed by ordinary prose. It does not cover a marker
 followed by a well-formed function header — which is exactly what the model writes
@@ -90,7 +91,8 @@ model never meant to make, and without them the serving layer drops the call and
 returns `content: null`, so the whole answer disappears. The visible output stops at
 the fence opener, which is why this reads as "output dies on a backtick".
 
-Patch 13 adds a second guard, also `qwen3`-only:
+Patch 13 adds a second guard, on the same `qwen3` configuration (so it also covers
+`qwen3_coder` and `qwen3_xml`):
 
 - **Inside a fenced code block**, `<tool_call>` and `<function=` stay text and open
   no call. Fences follow CommonMark: a run of three or more backticks or tildes at
