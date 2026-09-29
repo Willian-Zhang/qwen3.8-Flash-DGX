@@ -562,3 +562,35 @@ layer-level hook.
 The hybrid layout needed one more change: `vllm_fp8_hybrid_modelopt.py` used to patch only
 `ModelOptNvFp4Config`; on the mixed config the fp8-converted side layers were caught by the
 checkpoint's exclude list and sent to the bf16 path. It now patches both classes.
+
+## Persistent compile cache on the preview base (PR #21)
+
+The README's measurements for `COMPILE_CACHE` as it was introduced, with two volumes
+(`<name>-vllm`, `<name>-flashinfer`), on the preview image. On v0.30 the picture differs (no
+torch.compile cache, Triton and the driver JIT dominate); see the README section.
+
+Measured on a GX10, hybrid + YaRN 500k + MTP=2, same recipe each time. **Boot totals are not usable
+for this**: weight loading varied between 464 s and 554 s on page-cache state alone, and CUDA-graph
+capture between 4 s and 13 s, both larger than the effect being measured. The signal is in init
+engine with capture excluded, one row per boot:
+
+| boot | init engine | capture | init engine − capture | `torch.compile` |
+|---|---|---|---|---|
+| 1 — unset (default) | 129.2 s | 13 s | 116.2 s | 37.9 s |
+| 2 — set, populating | 125.5 s | 10 s | 115.5 s | 37.5 s |
+| 3 — set, reused | 41.1 s | 4 s | 37.1 s | 4.2 s |
+| 4 — set, reused, Triton volume emptied | 50.2 s | 13 s | 37.2 s | 0.7 s |
+| 5 — set, reused, final two-mount config | 37.3 s | 4 s | 33.3 s | 0.7 s |
+
+Reused (boots 3–5) is **35.9 s ± 2 s**, against **116.2 s** with the cache off: **−80 s ± 2 s
+(−69%)** per boot. Populating it costs nothing (boot 2 at 115.5 s against boot 1 at 116.2 s).
+Reused boots log `Directly load AOT compilation from path …`. Disk: 168 MB for the vLLM cache,
+0.5 MB for FlashInfer. Startup only — no effect on outputs, so nothing for the tournament to say.
+
+**Triton's `/root/.triton` is deliberately not persisted.** It looks like it should be the
+interesting one: `jit_monitor` warns that five kernels (`_qsa_mqa_paged_kernel`,
+`_qsa_sparse_paged_gqa_splitk`, `_compute_local_logits_stats_`, `_rejection_kernel`,
+`_resample_kernel`) JIT-compile *during the first request*. Boot 4 above tested it directly — vLLM
+cache warm, only the Triton volume emptied — and came out at 37.2 s against boot 3's 37.1 s: a
+0.2 s difference, an order of magnitude below the capture noise. The five warnings appear in every
+boot either way, warm or cold. Mounting it would have been cargo cult.

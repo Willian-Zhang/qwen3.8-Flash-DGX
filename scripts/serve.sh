@@ -50,10 +50,11 @@
 #   PREWARM=0         1 = stream the 48 GiB table once at boot to warm the page cache
 #   WORKERS=32        threads for the mmap gather
 #   EXTRA=            extra vllm flags passed verbatim
-#   COMPILE_CACHE=    where to keep vLLM's compiled graphs and FlashInfer's JIT modules across
-#                     boots. Unset (default) = inside the container, which this script recreates
-#                     every time, so they are rebuilt on every boot (80 s of init engine, see
-#                     README). A bare name becomes docker volumes, an absolute path binds dirs
+#   COMPILE_CACHE=    where to keep vLLM's and FlashInfer's caches, Triton's kernels and the CUDA
+#                     driver's JIT cache across boots. Unset (default) = inside the container,
+#                     which this script recreates every time, so they are rebuilt on every boot
+#                     (~37 s of startup, see README). A bare name becomes docker volumes, an
+#                     absolute path binds dirs
 #   IMAGE=qwen38-flash-dgx:v0.30   MODEL=nvidia/Qwen3.8-Flash-Next-NVFP4   (RadixArk/Qwen3.8-Flash-Next-NVFP4 still supported: MODEL=...)
 set -euo pipefail
 
@@ -238,16 +239,22 @@ PC_ARG=--no-enable-prefix-caching
 # only the multiprocess collector. vllm:ple_mmap_engine_start_time_seconds stands in as a restart
 # marker (issue #36). That is why it is off by default: it changes what existing dashboards see.
 PROM_ARGS=(); [ "$PROM_MULTIPROC" = 1 ] && PROM_ARGS=(--tmpfs /tmp/vllm-prometheus:rw,size=256m -e PROMETHEUS_MULTIPROC_DIR=/tmp/vllm-prometheus)
-# Both are keyed by a hash of the model and the engine config, so one pair is safe to
-# share across profiles: a different recipe lands in a different entry. /root/.triton is
-# deliberately not persisted — measured at 0.2 s, below CUDA-graph capture noise.
+# vllm and flashinfer are keyed by a hash of the model and the engine config, so one set is
+# safe to share across profiles: a different recipe lands in a different entry. Triton keys
+# each kernel by its source, constants and backend; the CUDA driver's PTX JIT cache
+# (/root/.nv) by PTX and driver version. Without these two, init engine JIT-compiles ~140
+# Triton kernels and the vision tower's sm80 PTX on every boot (~26 s, see README).
 CACHE_MNT=()
 case "$COMPILE_CACHE" in
   "") ;;
   /*) CACHE_MNT=(-v "$COMPILE_CACHE/vllm:/root/.cache/vllm"
-                -v "$COMPILE_CACHE/flashinfer:/root/.cache/flashinfer") ;;
+                -v "$COMPILE_CACHE/flashinfer:/root/.cache/flashinfer"
+                -v "$COMPILE_CACHE/triton:/root/.triton"
+                -v "$COMPILE_CACHE/nv:/root/.nv") ;;
   *)  CACHE_MNT=(-v "${COMPILE_CACHE}-vllm:/root/.cache/vllm"
-                -v "${COMPILE_CACHE}-flashinfer:/root/.cache/flashinfer") ;;
+                -v "${COMPILE_CACHE}-flashinfer:/root/.cache/flashinfer"
+                -v "${COMPILE_CACHE}-triton:/root/.triton"
+                -v "${COMPILE_CACHE}-nv:/root/.nv") ;;
 esac
 
 docker rm -f "$NAME" >/dev/null 2>&1 || true

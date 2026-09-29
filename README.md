@@ -164,7 +164,7 @@ one wins; anything below it stays an option.
 | NVFP4 MTP draft experts (`MODE=hybrid-mtp`) | option | +22% KV pool, −3.9 GiB weights, decode unchanged here, tournament neutral (44/51) |
 | fp8 KV cache (`KV_DTYPE=fp8_e4m3`) | option | ×1.9 KV pool, 1M context. −4% decode, −3 to −17% prefill, tournament 88.4% (3 runs, 500k context) vs 87.8% in bf16 (3 runs); prefix-cache blocks twice as coarse |
 | Exact `torch.topk` (`EXACT_TOPK=1`) | fallback | deterministic like the kernel, −20–40% long prefill |
-| Persistent compile cache (`COMPILE_CACHE`) | option | −80 s ± 2 s of init engine per boot after the first; startup only, outputs and tournament unaffected |
+| Persistent compile cache (`COMPILE_CACHE`) | option | −37 s of startup per boot after the first (init engine −26 s); startup only, outputs and tournament unaffected |
 | `--long-prefill-token-threshold` (via `EXTRA`) | option | keeps decoding clients responsive under concurrent prefills, at a TTFT cost |
 
 If your priority is raw throughput rather than the agent's reliability, the fast profile is
@@ -419,41 +419,50 @@ restore determinism, so it is the kernel itself.)
 ## Optional: persistent compile cache (`COMPILE_CACHE`)
 
 `scripts/serve.sh` recreates the container on every run (`docker rm -f`, then `docker run`), so
-vLLM's compiled graphs — written to `/root/.cache/vllm` inside the container — are discarded and
-rebuilt on every boot. If you keep one container and cycle it with `./flash stop` / `./flash start`
-this costs nothing, which is why it went unnoticed. It costs you when something else recreates the
-container for you: a proxy that loads and evicts models on demand (llama-swap and friends), CI, or
-a tournament run that calls `serve.sh` between configurations.
+what vLLM and its kernels compile inside the container is discarded and rebuilt on every boot. If
+you keep one container and cycle it with `./flash stop` / `./flash start` this costs nothing, which
+is why it went unnoticed. It costs you when something else recreates the container for you: a proxy
+that loads and evicts models on demand (llama-swap and friends), CI, a tournament run that calls
+`serve.sh` between configurations, or a systemd unit around `serve.sh`.
 
-`COMPILE_CACHE=<name>` mounts two docker volumes (`<name>-vllm`, `<name>-flashinfer`) over the two
-cache directories. `COMPILE_CACHE=/some/path` binds `/some/path/vllm` and `/some/path/flashinfer`
-instead, to put them on a chosen disk. Unset — the default — is exactly the behaviour above.
+`COMPILE_CACHE=<name>` mounts four docker volumes over the four cache directories: `<name>-vllm`
+(`/root/.cache/vllm`), `<name>-flashinfer` (`/root/.cache/flashinfer`), `<name>-triton` (Triton's
+`/root/.triton`) and `<name>-nv` (the CUDA driver's JIT cache, `/root/.nv`).
+`COMPILE_CACHE=/some/path` binds `/some/path/{vllm,flashinfer,triton,nv}` instead, to put them on a
+chosen disk. Unset — the default — is exactly the behaviour above.
 
-Measured on a GX10, hybrid + YaRN 500k + MTP=2, same recipe each time. **Boot totals are not usable
-for this**: weight loading varied between 464 s and 554 s on page-cache state alone, and CUDA-graph
-capture between 4 s and 13 s, both larger than the effect being measured. The signal is in init
-engine with capture excluded, one row per boot:
+Where the time goes without it (one py-spy-profiled boot):
 
-| boot | init engine | capture | init engine − capture | `torch.compile` |
+- **Triton, ~20 s of init engine.** About 140 kernels (QSA, PLE, fused MoE, GDN, sampler) are built
+  from scratch: in the memory profile, in the graph capture that sizes the KV cache (its "10 secs"
+  are mostly compiles; 2 s with a warm cache), in kernel warmup and in v0.30's `warmup_kernels`.
+- **CUDA driver JIT, ~5 s of init engine.** The vision tower's cuBLAS GEMMs and flash-attn hdim-96
+  kernel ship as sm80 PTX, which the driver compiles for GB10 into `/root/.nv`.
+- **vLLM's `modelinfos`, ~11 s of API-server startup.** Without it the model classes are inspected
+  in a subprocess. v0.30 writes no torch.compile cache for this recipe, so this 16 KB is all the
+  `-vllm` volume holds. The FlashInfer volume made no measurable difference.
+
+Measured on a GX10, hybrid + YaRN 500k + MTP=2, weights over NFS, same recipe each time, one row per
+boot:
+
+| boot | init engine | graph captures | start → ready | Triton kernels / driver JIT files written |
 |---|---|---|---|---|
-| 1 — unset (default) | 129.2 s | 13 s | 116.2 s | 37.9 s |
-| 2 — set, populating | 125.5 s | 10 s | 115.5 s | 37.5 s |
-| 3 — set, reused | 41.1 s | 4 s | 37.1 s | 4.2 s |
-| 4 — set, reused, Triton volume emptied | 50.2 s | 13 s | 37.2 s | 0.7 s |
-| 5 — set, reused, final two-mount config | 37.3 s | 4 s | 33.3 s | 0.7 s |
+| unset (default) | 53.4 s | 10 + 2 s | 121.1 s | 139 / 13 |
+| vllm + flashinfer volumes only | 53.5 s | 10 + 2 s | 110.3 s | 139 / 13 |
+| four volumes, populating | 53.9 s | 10 + 2 s | 111.1 s | 139 / 13 |
+| four volumes, reused (4 boots) | 27.5–28.1 s | 2 + 2 s | 83.4–85.0 s | 0 / 0 |
+| reused, only the `-nv` volume emptied | 33.3 s | 2 + 2 s | 89.4 s | 0 / 13 |
 
-Reused (boots 3–5) is **35.9 s ± 2 s**, against **116.2 s** with the cache off: **−80 s ± 2 s
-(−69%)** per boot. Populating it costs nothing (boot 2 at 115.5 s against boot 1 at 116.2 s).
-Reused boots log `Directly load AOT compilation from path …`. Disk: 168 MB for the vLLM cache,
-0.5 MB for FlashInfer. Startup only — no effect on outputs, so nothing for the tournament to say.
+Reused against unset is **−26 s of init engine and −37 s of start → ready** per boot. Populating
+costs nothing. Disk: 51 MB Triton, 124 MB driver JIT, under 1 MB for the other two. Startup only:
+greedy probe (5 prompts) byte-identical in text and first-token logprobs against a boot without the
+Triton and driver volumes. Triton keys each kernel by its source, constants and backend, and the
+driver by PTX and driver version, so a changed kernel or a new driver compiles again instead of
+reusing a stale entry.
 
-**Triton's `/root/.triton` is deliberately not persisted.** It looks like it should be the
-interesting one: `jit_monitor` warns that five kernels (`_qsa_mqa_paged_kernel`,
-`_qsa_sparse_paged_gqa_splitk`, `_compute_local_logits_stats_`, `_rejection_kernel`,
-`_resample_kernel`) JIT-compile *during the first request*. Boot 4 above tested it directly — vLLM
-cache warm, only the Triton volume emptied — and came out at 37.2 s against boot 3's 37.1 s: a
-0.2 s difference, an order of magnitude below the capture noise. The five warnings appear in every
-boot either way, warm or cold. Mounting it would have been cargo cult.
+On the preview base, where this option started (PR #21), it was vLLM's torch.compile cache that
+mattered (−80 s of init engine) and Triton's made no difference; those measurements are in
+[docs/HISTORY.md](docs/HISTORY.md#persistent-compile-cache-on-the-preview-base-pr-21).
 
 ## Faster weight loading (patches 14–18, default on)
 
@@ -619,7 +628,7 @@ mmap patch should apply; we have not booted one ourselves.
 | `KV_DTYPE` | `auto` | `auto` = bf16 (recommended). `fp8_e4m3` = ~1.9× KV pool, 1M context on one box, at −10% decode / −30% prefill and a measurable quality cost — see [fp8 KV cache](docs/HOW-IT-WORKS.md#fp8-kv-cache-on-the-qsa-path-opt-in) before using it. |
 | `PREWARM` | `0` | `1` streams the 48 GiB table once at boot to warm the page cache — steadier first-request latency, ~10 s extra startup. |
 | `WORKERS` | `32` | Threads used for the mmap gather: every gather at the default `FAST_ROWS=0`; with `FAST_ROWS=512`, only gathers above 512 unique rows (decode-sized gathers then run inline). |
-| `COMPILE_CACHE` | | Keep vLLM's compiled graphs across boots — this script recreates the container every run, so by default they are rebuilt each time. `<name>` = two docker volumes, `/abs/path` = two bind mounts. **−80 s ± 2 s of init engine** per boot after the first, 169 MB of disk; only worth setting if something recreates the container for you (a model-swapping proxy, CI, tournament runs). See [above](#optional-persistent-compile-cache-compile_cache). |
+| `COMPILE_CACHE` | | Keep vLLM's, FlashInfer's, Triton's and the CUDA driver's caches across boots — this script recreates the container every run, so by default they are rebuilt each time. `<name>` = four docker volumes, `/abs/path` = four bind mounts. **−37 s of startup** (init engine −26 s) per boot after the first, ~175 MB of disk; only worth setting if something recreates the container for you (a model-swapping proxy, CI, tournament runs, a systemd unit). See [above](#optional-persistent-compile-cache-compile_cache). |
 | `LOG_REQUESTS` | `0` | `1` logs every prompt and output (`VLLM_LOGGING_LEVEL=DEBUG --enable-log-requests --enable-log-outputs`) so `tools/vllm_watch.py` can show sessions live. Debugging only: it puts user content in the Docker log, unbounded. |
 | `PROM_MULTIPROC` | `0` | `1` runs prometheus_client in multiprocess mode so engine-side metrics (`vllm:ple_mmap_*`) reach `/metrics`. Opt-in, because it stops vLLM exporting its `*_created` samples and the `process_*` / `python_*` metrics (`process_start_time_seconds` included; `vllm:ple_mmap_engine_start_time_seconds` stands in as a restart marker); see *Watching the mmapped table* below. |
 | `KV_CACHE_MEM` | | Passed through as `--kv-cache-memory-bytes`. `GPU_MEM` is a fraction of *total* device memory, so it leaves whatever was already resident on the table; vLLM prints the exact figure it would accept at startup ("Replace gpu_memory_utilization config with `--kv-cache-memory=...`"). On a Spark that headroom is also what the page cache uses for the PLE table, so taking it is a trade, not free memory — watch `vllm:ple_mmap_gather_seconds_total` when you do. |
