@@ -26,10 +26,11 @@ Handoff notes. Goal: cut the ~9 min of "Loading weights" at every boot of `qwen3
 ## State at handoff
 
 - Image: `qwen38-flash-dgx:v0.30` (`Dockerfile.v0.30`, vLLM v0.30.0, patches 14–18 included) since
-  2026-09-26, 108 s to ready. The preview image (`qwen38-flash-dgx:latest`, patches 1–18) is kept for
+  2026-09-26; 108 s to ready, 84 s since `COMPILE_CACHE` also covers Triton and the driver JIT
+  (2026-09-29, last section). The preview image (`qwen38-flash-dgx:latest`, patches 1–18) is kept for
   rollback: `IMAGE=` and `COMPILE_CACHE=qwen38` in the env file.
 - Serving `nvidia/Qwen3.8-Flash-Next-NVFP4`, `MODE=hybrid` (snapshot `fc694b5…-fp8hybrid`), YaRN 500k,
-  MTP=2, `PREWARM=0`, `COMPILE_CACHE=qwen38v030` (docker volumes, reused: init engine 53 s on v0.30,
+  MTP=2, `PREWARM=0`, `COMPILE_CACHE=qwen38v030` (docker volumes, reused: init engine 28 s on v0.30,
   31 s on the preview), port 8000.
   Settings: `systemd/qwen38-flash.env`; unit: `systemd/qwen38-flash.service`.
 - Weights are served from the kc3000 NFS share first (`HF_HUB_DIRS`, NFS over RDMA, mounted `ro` at
@@ -433,6 +434,22 @@ patch 16's script will need dropping once the base image includes it. vllm#58726
 (prefault in `safetensors_weights_iterator`, asking maintainers about the gate and the size cap);
 no reply yet. Next: measure prefault on the discrete-GPU machine, where the pageable copy is
 staged through a CPU memcpy anyway.
+
+## Init engine on v0.30: Triton and driver JIT caches (2026-09-29)
+
+Weights over NFS on two trunked 100G links now (rdma-experiments `second-cable-test-plan.md` §6). The
+main load didn't move (20.8–23.2 s vs 20.4–21.7 on one link, ~30 Gb/s on the wire either way):
+`pread` is ~5.7 s of it, the rest is one CPU-bound thread. What moved was init engine. Two py-spy
+boots found ~23 s of Triton compiles (139 kernels, `/root/.triton` rebuilt every boot) and ~5 s of
+CUDA driver PTX JIT (`/root/.nv`). `scripts/serve.sh` now mounts both under `COMPILE_CACHE`.
+Init engine 53.5 → 27.5–28.1 s, start → ready 110 → 83–85 s, greedy probe identical; boot table in
+the README's `COMPILE_CACHE` section. A boot with `COMPILE_CACHE` unset (121 s, init engine 53.4 s)
+showed the old two volumes buy nothing of init engine on v0.30, only ~11 s of API startup through
+vLLM's `modelinfos` cache: the README's "−80 s" (PR #21) is the preview base's torch.compile cache.
+
+What remains in init engine: the vision-encoder profile (~5 s), a ~8.5 s wait in `make_dummy`
+(`torch.cumsum`, likely queued GPU work; also on the preview), the flashinfer GDN CuTe DSL compile
+(~2 s, in-memory cache only), graph captures (2 + 2 s).
 
 ## Rerunning the benchmark
 
