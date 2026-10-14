@@ -641,6 +641,8 @@ mmap patch should apply; we have not booted one ourselves.
 | `CTX` | `262144` | Max context. Native is 262144; with `YARN=1` up to `500000` is validated. |
 | `YARN` | `0` | `1` = YaRN rope scaling (factor 4, Qwen's recipe) for `CTX` > 262144. |
 | `SEQS` | `8` | Max concurrent sequences. **Do not benchmark with 1–2**: excess requests queue silently and aggregate tok/s flatlines (see below). |
+| `CPUSET` | `5-9,15-19` | docker `--cpuset-cpus`: pin the container to specific cores. Default is the 10 Cortex-X5 performance cores on the GB10 — the SGLang recipe for the 27B sibling model pinned its process there and kept it in its measured configs. `CPUSET=` (empty) = all 20 cores. |
+| `MAMBA_SSM_DTYPE` | | `--mamba-ssm-cache-dtype` for the GDN (mamba-style) recurrent state pool. vLLM defaults to `float32`; `bfloat16` halves that pool — on the 27B sibling model 30.9 GB → 15.6 GB at pool 80 — which is what frees the headroom to raise `SEQS`. See [the cross-referenced findings](#tuning-findings-cross-referenced-from-the-27b-sibling-recipe). |
 | `GPU_MEM` | `0.80` | Fraction of the 128 GB pool for weights+KV. `0.85` buys ~2 GiB more KV, but after a day at `0.85` the box drifted into swap, and `0.875` got OOM-killed on a 300k-token prefill with MTP. The lower you set it, the more RAM the page cache has for the 48 GiB table — which is what your prefill speed depends on (below). Right after stopping another big container the first boot can fail with "13.5 GiB KV cache is needed, larger than available" — memory not yet released; the `unless-stopped` retry succeeds. |
 | `MTP` | `2` | Speculative tokens from the model's MTP head (`0` = off). `3` is +7% decode but cost a point at the tournament (44 vs 45/51), so it stays an option. |
 | `KV_DTYPE` | `auto` | `auto` = bf16 (recommended). `fp8_e4m3` = ~1.9× KV pool, 1M context on one box, at −10% decode / −30% prefill and a measurable quality cost — see [fp8 KV cache](docs/HOW-IT-WORKS.md#fp8-kv-cache-on-the-qsa-path-opt-in) before using it. |
@@ -787,6 +789,96 @@ smaller chunks do have one unambiguous benefit: peak swap-out during the prefill
 - The structural way out is a second Spark: the four ConnectX-7 ports exist for that, and
   vLLM's prefill/decode disaggregation puts the prefills on the other box.
 
+### Tuning findings cross-referenced from the 27B sibling recipe
+
+[aphex3k/Qwen3.8-27B-on-DGX-Spark](https://github.com/aphex3k/Qwen3.8-27B-on-DGX-Spark)
+serves the same Qwen3.8 hybrid architecture (GDN + PLE) on this same box, but through
+SGLang instead of vLLM. Its [measured results](https://github.com/aphex3k/Qwen3.8-27B-on-DGX-Spark/blob/main/results/RESULTS.md)
+are the best GB10 data we have on the architecture's concurrency behaviour, so this repo
+ports the findings that have a vLLM equivalent and leaves the rest documented as SGLang-only.
+
+**Ported (this repo):**
+
+- **Concurrency headroom** — the sibling sweep showed aggregate throughput tracks the
+  running-request cap, not the hardware: at the shipped cap of 4, 4 → 8 streams gained
+  only 2%; at cap 16 the peak reached 480.7 tok/s (vs 190.1 at cap 8). The equivalent
+  knob here is `SEQS` (`--max-num-seqs`): the `concurrent` profile raises it to 16 for
+  aggregate-throughput runs. This matches what the @jschmied sweep above already showed
+  for this model.
+- **`MAMBA_SSM_DTYPE=bfloat16`** — the sibling's `--mamba-ssm-dtype bfloat16` halves the
+  GDN state pool (30.9 GB → 15.6 GB at pool 80; float32 is the engine default). The vLLM
+  equivalent, `--mamba-ssm-cache-dtype`, is exposed as `MAMBA_SSM_DTYPE` and set by the
+  `concurrent` profile. The Flash model's pool is much smaller than the 27B's, but the
+  same principle applies: halving the pool is free KV/page-cache headroom.
+- **`CPUSET=5-9,15-19`** — the sibling pinned SGLang to the 10 Cortex-X5 performance
+  cores and kept it in every measured config. Exposed as `CPUSET` → docker
+  `--cpuset-cpus` and pinned by default for the same reason; `CPUSET=` (empty) runs
+  the container on all 20 cores. We did not measure a delta on this model yet, so
+  treat the pin as an unverified port until A/B'd.
+
+**SGLang-specific (not ported, no vLLM equivalent in v0.30):**
+
+- `--max-mamba-cache-size` / `--max-running-requests` / `--cuda-graph-max-bs-decode` —
+  SGLang sizes the mamba pool and the running-request cap as separate flags; vLLM sizes
+  the GDN pool from the remaining memory and caps concurrency with `--max-num-seqs` alone.
+- `--mamba-full-memory-ratio` and `--mamba-radix-cache-strategy` — SGLang scheduler
+  internals with no vLLM flag.
+- `--speculative-num-draft-tokens` — the sibling found draft=16 gives +28–41%
+  single-stream but −10–15% aggregate, and that every draft token is verified so quality
+  is unaffected. vLLM's MTP knob is `num_speculative_tokens` (`MTP=`), which is not the
+  same dial; `MTP=3` is what we validated here (+7% decode, −1 tournament point), so the
+  wider-window finding is recorded for context, not wired up.
+- `--mem-fraction-static 0.85` — the sibling's settled value; our `GPU_MEM` already
+  covers this and its own measurements (0.80 stable, 0.875 OOM) are documented above.
+
+**Measurement caveats that also apply here** — the sibling's results document the traps it hit (boot-to-boot variance, greedy non-determinism, truncation reading as a quality regression); the [Benchmarking](#benchmarking) section below restates them as this repo's hygiene rules.
+
+## Benchmarking
+
+`bench/` is a self-contained suite that measures this recipe the same way the
+[Qwen3.8-27B-on-DGX-Spark](https://github.com/aphex3k/Qwen3.8-27B-on-DGX-Spark/results/RESULTS.md)
+recipe was measured on the same hardware, so the two can be compared head to head:
+
+```bash
+export GB10_BASE_URL=http://127.0.0.1:18300/v1   # wherever `./flash serve` listens
+export GB10_MODEL=qwen3.8-flash-next
+
+python3 bench/perf.py             # TTFT, single-stream decode, concurrency sweep, prefill curve
+python3 bench/longctx.py          # concurrent long-context; unique content per stream
+./scripts/run-humaneval.sh        # HumanEval pass@1, thinking off (~5 min)
+./scripts/run-humaneval.sh think  # thinking on (~20 min)
+```
+
+Everything is env-driven (`GB10_BASE_URL`, `GB10_API_KEY`, `GB10_MODEL` — see
+`bench/common.py`) and the scripts are self-locating, so nothing is path-dependent.
+HumanEval needs one-time setup on the box:
+`python3 -m pip install --user pandas pyarrow huggingface_hub`; the dataset lands in
+`data/humaneval`, results in `results/` (both gitignored), and candidates are executed
+against their real unit tests in a `--network none` `python:3.12-slim` container.
+Thinking is toggled through the checkpoint's `reasoning_effort` template argument
+(`low` off, `xhigh` on — override with `GB10_REASONING_OFF` / `GB10_REASONING_ON`).
+
+Measurement hygiene — each of these has produced a wrong number before:
+
+- **Run on an idle box.** Any competing GPU work skews every figure.
+- **Boot-to-boot single-stream variance is ~8%**, against <2% run-to-run within one
+  instance. Size A/B deltas against that band; re-measure a small win on a fresh boot.
+- **Greedy is not bitwise-stable across batch shapes** (see the deterministic top-k
+  section); treat a pass@1 delta of ±2 HumanEval problems as noise.
+- **Truncation reads as a quality regression.** A capped `max_tokens` truncates
+  thinking runs; check `finish_reason == "length"` before quoting a score.
+  `run-humaneval.sh` reports truncated problems separately from real failures.
+- **Count `completion_tokens`, not stream events** — speculative decoding emits
+  several tokens per event.
+- **Long-context concurrency:** give every stream *unique* content, or the prefix cache
+  deduplicates it and you measure cache hits instead of KV capacity. Prefill
+  serialises, so read seconds-per-stream, not aggregate tok/s.
+- **Concurrency sweep:** raise `SEQS` to at least the highest stream count you sweep,
+  or excess requests queue silently and the aggregate flatlines (see above).
+- **Health probes:** a model saturated on long prefills is healthy but too busy to
+  answer a 5 s probe. If a supervisor watches the server, use ≥30 s timeouts or it will
+  restart a healthy, busy server mid-job.
+
 ## How it fits — the one idea
 
 A token's n-gram lookup reads **16 rows × 160 bytes ≈ 2.5 KB**. Over a 20k-token
@@ -891,6 +983,8 @@ tools/vllm_watch.py               live per-session view of prompts / reasoning /
 scripts/serve.sh                  MODE=nvfp4|hybrid|hybrid-mtp, SERVED_MODEL_NAME, PREFIX_CACHE, DET_TOPK, DRAFT_VOCAB, MADVISE, EXACT_TOPK, KV_DTYPE, YARN, ...
 scripts/smoke-test.sh             health, coherence, prefix-cache hit, determinism, tok/s
 scripts/greedy-probe.sh           greedy probe set; diff two arms to gate a draft/checkpoint swap
+scripts/run-humaneval.sh          HumanEval end-to-end: generate -> sandboxed execution -> report
+bench/                            perf.py (TTFT/decode/concurrency/prefill), longctx.py, humaneval/ — the benchmark suite
 docs/HOW-IT-WORKS.md              how each patch works, with the measurements
 docs/HISTORY.md                   the earlier updates and the preview / v0.29 bases
 ```

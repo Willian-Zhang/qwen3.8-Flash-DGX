@@ -270,7 +270,8 @@ cmd_serve() {
   case "$profile" in *=*) profile=default ;; *) shift || true ;; esac
   need_profile "$profile"; load_profile "$PROFILE_FILE" "$@"
   echo "serve — profile '$profile': $(profile_meta "$PROFILE_FILE" desc)"
-  printf '%s  MODE=%s IMAGE=%s NAME=%s PORT=%s CTX=%s YARN=%s MTP=%s GPU_MEM=%s KV_DTYPE=%s%s\n' "$c_dim" "$MODE" "$IMAGE" "$NAME" "$PORT" "${CTX:-262144}" "${YARN:-0}" "${MTP:-2}" "$GPU_MEM" "$KV_DTYPE" "$c_off"
+  printf '%s  MODE=%s IMAGE=%s NAME=%s PORT=%s CTX=%s YARN=%s MTP=%s SEQS=%s GPU_MEM=%s KV_DTYPE=%s%s\n' "$c_dim" "$MODE" "$IMAGE" "$NAME" "$PORT" "${CTX:-262144}" "${YARN:-0}" "${MTP:-2}" "${SEQS:-8}" "$GPU_MEM" "$KV_DTYPE" "$c_off"
+  [ -n "${CPUSET:-}${MAMBA_SSM_DTYPE:-}" ] && printf '%s  CPUSET=%s MAMBA_SSM_DTYPE=%s%s\n' "$c_dim" "${CPUSET:--}" "${MAMBA_SSM_DTYPE:--}" "$c_off" || true
   [ -n "${EXTRA:-}" ] && printf '%s  EXTRA=%s%s\n' "$c_dim" "$EXTRA" "$c_off" || true
   have_image || die "$IMAGE is not built — run: ./flash setup $profile"
   have_weights || die "weights not downloaded — run: ./flash setup $profile"
@@ -280,7 +281,7 @@ cmd_serve() {
   local b; b="$(image_base)"
   [ "$b" != "$BASE_EXPECTED" ] && die "$IMAGE is an old '${b:-unlabeled}' build, this recipe needs the $BASE_EXPECTED base — run: ./flash setup $profile"
   if [ "$(container_state)" = running ]; then info "$NAME is running and will be replaced"; fi
-  if [ "$DRY" = 1 ]; then info "dry run: would exec scripts/serve.sh with the environment above"; env | grep -E '^(MODE|IMAGE|NAME|SERVED_MODEL_NAME|PORT|CTX|YARN|MTP|SEQS|GPU_MEM|KV_DTYPE|PREFIX_CACHE|DET_TOPK|EXACT_TOPK|DRAFT_VOCAB|MADVISE|FAST_ROWS|EFFORT_ALIAS|PREWARM|COMPILE_CACHE|EXTRA|LOG_REQUESTS|WORKERS)=' | sort | sed 's/^/    /'; return 0; fi
+  if [ "$DRY" = 1 ]; then info "dry run: would exec scripts/serve.sh with the environment above"; env | grep -E '^(MODE|IMAGE|NAME|SERVED_MODEL_NAME|PORT|CTX|YARN|MTP|SEQS|CPUSET|MAMBA_SSM_DTYPE|GPU_MEM|KV_DTYPE|PREFIX_CACHE|DET_TOPK|EXACT_TOPK|DRAFT_VOCAB|MADVISE|FAST_ROWS|EFFORT_ALIAS|PREWARM|COMPILE_CACHE|EXTRA|LOG_REQUESTS|WORKERS)=' | sort | sed 's/^/    /'; return 0; fi
   remember_profile "$profile"
   exec "$HERE/scripts/serve.sh"
 }

@@ -36,6 +36,12 @@
 #   YARN=0            1 = YaRN rope scaling (factor 4) for CTX > 262144
 #   SEQS=8            max concurrent sequences. Do NOT leave this at 1-2 when measuring
 #                     throughput: requests queue silently and aggregate tok/s flatlines
+#   CPUSET=5-9,15-19  docker --cpuset-cpus: pin the container to specific cores. Default is
+#                     the GB10's 10 Cortex-X5 performance cores (the SGLang sibling recipe
+#                     pinned there in every measured config); CPUSET= (empty) = all 20 cores
+#   MAMBA_SSM_DTYPE=  --mamba-ssm-cache-dtype for the GDN recurrent state pool. vLLM
+#                     defaults to float32; bfloat16 halves the pool (15.6 GB vs 30.9 GB on
+#                     the 27B sibling model), freeing headroom to raise SEQS
 #   PROM_MULTIPROC=0  1 = engine-side metrics (vllm:ple_mmap_*) reach /metrics (opt-in; see PROM_ARGS below)
 #   KV_CACHE_MEM=     bytes for the KV cache, as --kv-cache-memory-bytes. GPU_MEM is a fraction of
 #                     TOTAL device memory, so it also leaves out whatever was already resident;
@@ -76,6 +82,10 @@ PORT="${PORT:-18300}"
 CTX="${CTX:-262144}"
 YARN="${YARN:-0}"
 SEQS="${SEQS:-8}"
+# Default: pin to the Cortex-X5 performance cores (the 27B sibling recipe's
+# measured config). Set CPUSET= (empty) to let the container use all 20 cores.
+CPUSET="${CPUSET-5-9,15-19}"
+MAMBA_SSM_DTYPE="${MAMBA_SSM_DTYPE:-}"
 GPU_MEM="${GPU_MEM:-0.80}"
 MTP="${MTP:-2}"
 KV_DTYPE="${KV_DTYPE:-auto}"
@@ -213,6 +223,21 @@ if [ "$MTP" != 0 ]; then
   fi
 fi
 
+# CPUSET pins the container to specific cores (docker --cpuset-cpus). On GB10 the
+# high cores 5-9,15-19 are the Cortex-X5 performance cluster; the SGLang sibling
+# recipe (aphex3k/Qwen3.8-27B-on-DGX-Spark) pinned its process there and kept the
+# numbers in the table they publish. Empty = the container sees all 20 cores.
+CPU_ARGS=()
+[ -n "$CPUSET" ] && CPU_ARGS=(--cpuset-cpus "$CPUSET")
+
+# MAMBA_SSM_DTYPE sets --mamba-ssm-cache-dtype for the GDN (mamba-style) recurrent
+# state pool. vLLM defaults to float32; bfloat16 halves that pool — on the 27B
+# sibling model 15.6 GB instead of 30.9 GB at pool 80, which is what frees the
+# headroom to raise SEQS. Empty = let vLLM pick its default; vLLM rejects a
+# value it does not know at startup (the boot check below reports it).
+SSM_ARGS=()
+[ -n "$MAMBA_SSM_DTYPE" ] && SSM_ARGS=(--mamba-ssm-cache-dtype "$MAMBA_SSM_DTYPE")
+
 DETENV=(); [ "$DET_TOPK" = 1 ] && DETENV=(-e VLLM_QSA_DET_TOPK=1 -e VLLM_QSA_DET_LIB=/opt/llm/kernel-det/_C_det.so)
 case "$DRAFT_VOCAB" in
   0|"") ;;
@@ -306,6 +331,7 @@ trap 'rc=$?; [ $rc -ne 0 ] && docker rm -f "$NAME" >/dev/null 2>&1; exit $rc' EX
 # shellcheck disable=SC2086
 docker run -d --name "$NAME" --restart unless-stopped \
   --gpus all --ipc=host --shm-size 16g -p "${PORT}:8000" \
+  "${CPU_ARGS[@]}" \
   -v "$HF_CACHE:/hf" -e HF_HOME=/hf -e HF_HUB_OFFLINE=1 \
   "${PROM_ARGS[@]}" \
   "${ALLOCATOR_ENV[@]}" \
@@ -322,6 +348,7 @@ docker run -d --name "$NAME" --restart unless-stopped \
     $CC \
     --no-enable-flashinfer-autotune \
     --kv-cache-dtype "$KV_DTYPE" ${KV_CACHE_MEM:+--kv-cache-memory-bytes "$KV_CACHE_MEM"} \
+    "${SSM_ARGS[@]}" \
     "${OVR_ARGS[@]}" "${LOGARGS[@]}" $EXTRA \
     --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3 \
     "${TEMPLATE_ARGS[@]}" "${SPEC[@]}"
@@ -341,6 +368,6 @@ case "$STATE" in
     ;;
 esac
 
-echo ">> $NAME starting on :$PORT (model '$SERVED_MODEL_NAME', mode=$MODE, ctx $CTX, yarn=$YARN, mtp=$MTP, seqs=$SEQS, prefix_cache=$PREFIX_CACHE, det_topk=$DET_TOPK, exact_topk=$EXACT_TOPK, draft_vocab=$DRAFT_VOCAB, madvise=$MADVISE, fast_rows=$FAST_ROWS, effort_alias=$EFFORT_ALIAS_STATE${COMPILE_CACHE:+, compile_cache=$COMPILE_CACHE})"
+echo ">> $NAME starting on :$PORT (model '$SERVED_MODEL_NAME', mode=$MODE, ctx $CTX, yarn=$YARN, mtp=$MTP, seqs=$SEQS, prefix_cache=$PREFIX_CACHE, det_topk=$DET_TOPK, exact_topk=$EXACT_TOPK, draft_vocab=$DRAFT_VOCAB, madvise=$MADVISE, fast_rows=$FAST_ROWS, effort_alias=$EFFORT_ALIAS_STATE${CPUSET:+, cpuset=$CPUSET}${MAMBA_SSM_DTYPE:+, ssm_dtype=$MAMBA_SSM_DTYPE}${COMPILE_CACHE:+, compile_cache=$COMPILE_CACHE})"
 echo ">> first boot loads ~75 GiB of weights (~3-4 min). Follow:  docker logs -f $NAME"
 echo ">> ready when the log says 'Application startup complete'. Then: scripts/smoke-test.sh"
