@@ -1,0 +1,12 @@
+This source patch and reproduction bundle targets vLLM.
+Upstream vLLM source is licensed under Apache-2.0; its source notices are preserved.
+Pinned upstream repository: https://github.com/vllm-project/vllm
+Pinned revision: ced6857afa0ea7b2e3f0846a62e1394e90f15607
+The patched files contain modifications described in README.md and SOURCE-MANIFEST.json.
+
+Port and integration in qwen3.8-Flash-DGX (2026-10-16):
+Original source bundle and regression fixtures supplied by Chaos2522 in issue #31.
+Ported upstream vLLM revision: db9527a46873454610df6dbedf79a36d6bf1a7f6 (v0.31.0).
+See SOURCE.json for bundle provenance, PORT-MANIFEST.json for the v0.31 targets,
+and docs/SAFE-OUTPUT.md for the changes and validation. The original pinned
+revision above describes the contributor's v0.30 bundle, not this v0.31 port.
