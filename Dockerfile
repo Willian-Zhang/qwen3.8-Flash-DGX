@@ -2,7 +2,7 @@
 #   1 PLE mmap, 2 GB10 FLA fixes, 4 prefix-caching block_size fix, 5 exact top-k, 6 hybrid mode,
 #   8 deterministic top-k kernel, 10 reduced draft vocabulary, 12 Qwen tool preamble fix,
 #   13 quoted Qwen tool markers stay text, 14 MoE weight-load clone (#33), 15-18 the rest of weight
-#   loading (pread, chunked embedding copy, MTP name prefilter).
+#   loading (pread, chunked embedding copy, MTP name prefilter), 19 token identity and Responses output.
 # Upstream now: 3 (vllm#50729), 7 (vllm#55557), 9 (vllm#52775),
 # 11 (vllm#55513), 16 (vllm#58720). Older bases remain in git history.
 #
@@ -88,6 +88,14 @@ RUN cd ${SP} && patch --batch --forward --fuzz=0 -p1 < /tmp/qwen-tool-preamble.p
 COPY src/patches/qwen-tool-marker-guard.patch /tmp/qwen-tool-marker-guard.patch
 RUN cd ${SP} && patch --batch --forward --fuzz=0 -p1 < /tmp/qwen-tool-marker-guard.patch \
  && rm /tmp/qwen-tool-marker-guard.patch
+
+# --- 19. Qwen token identity and truthful Responses terminal events (issue #31) ---
+# Ported from Chaos2522's source bundle to v0.31; requires patches 12 and 13.
+# No sampling/weight/KV changes. Responses buffers complete XML arguments;
+# Chat Completions retains its incremental argument streaming.
+COPY src/patches/qwen-safe-output.patch /tmp/qwen-safe-output.patch
+RUN cd ${SP} && patch --batch --forward --fuzz=0 -p1 < /tmp/qwen-safe-output.patch \
+ && rm /tmp/qwen-safe-output.patch
 
 # --- 14. MoE weight loading: clone the mmap view before the H2D copy (VLLM_LOAD_CLONE=0 disables) ---
 # PR #33 (@Willian-Zhang): the two call sites in routed_experts.py; byte-identical weights.

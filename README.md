@@ -118,6 +118,7 @@ patch --batch --forward --fuzz=0 -p1 < /path/to/qwen3.8-Flash-DGX/src/patches/qw
 patch --batch --forward --fuzz=0 -p1 < /path/to/qwen3.8-Flash-DGX/src/patches/qwen-tool-preamble-tests.patch
 patch --batch --forward --fuzz=0 -p1 < /path/to/qwen3.8-Flash-DGX/src/patches/qwen-tool-marker-guard.patch
 patch --batch --forward --fuzz=0 -p1 < /path/to/qwen3.8-Flash-DGX/src/patches/qwen-tool-marker-guard-tests.patch
+patch --batch --forward --fuzz=0 -p1 < /path/to/qwen3.8-Flash-DGX/src/patches/qwen-safe-output.patch
 .venv/bin/python -m pytest tests/parser/engine -q
 ```
 
@@ -126,6 +127,35 @@ cases over three chunk sizes: 21 fail and 9 pass on patch 12 alone, all 30 pass 
 patch 13. The 9 that pass either way are the no-regression guards — a real call
 still parses, a real call after a closed fence still parses, and patch 12's own
 inline-quoted-marker case is unchanged.
+
+## Parser and Responses output fixes (issue #31)
+
+New builds include [Chaos2522's output-integrity fixes](https://github.com/blazux/qwen3.8-Flash-DGX/issues/31#issuecomment-6191209070),
+ported to vLLM v0.31 as patch 19:
+
+- Qwen final parsing retains original token IDs, preserving ordinary text that
+  spells protocol markers instead of treating it as an atomic control token.
+- An empty Responses STOP is reported as a failure instead of a successful empty
+  answer. Streaming uses `response.failed`; nonstreaming returns an HTTP 500 error.
+- A token-limited Responses generation ends with `response.incomplete`, including
+  when the only generated content is hidden reasoning.
+
+Chat Completions keeps incremental tool-argument streaming. Responses buffers
+converted XML arguments until the call closes so truncated calls do not emit
+unfinished JSON. These fixes change parsing and error reporting; they do not
+prevent the model from emitting EOS early.
+
+Validated on GX10: **67/67 targeted methods and 21/21 literal-byte fixtures**,
+no additional failures in 4,782 parser-engine cases, and real-inference checks of
+terminal events and tool round trips. The 55-scenario tournament was used as a
+regression check; its score is not evidence of these bug fixes. See
+[scope and validation](docs/SAFE-OUTPUT.md) and the
+[reproduction suite](tests/issue31_safe_output/README.md).
+
+To update an existing installation, rebuild with
+`docker build -t qwen38-flash-dgx:v0.31 .`, then recreate the container with your
+usual profile and overrides. `./flash setup` reuses an existing v0.31 image and
+does not rebuild it for source-only fixes.
 
 ## Update 2026-10-08 — vLLM v0.31 is the current base
 
@@ -960,6 +990,7 @@ src/patch_qsa_fp8_kv.py           7. fp8_e4m3 KV cache on the QSA path (by @Nane
 src/patch_moe_load_clone.py      14. clone mmap-backed expert weights before the H2D copy          VLLM_LOAD_CLONE=0 disables
                                      (main weight load 541 -> 150 s on a Spark; docs/HOW-IT-WORKS.md)
 src/patches/qwen-tool-*.patch    12, 13. Qwen tool-marker fixes in the parser engine (+ their test modules)
+src/patches/qwen-safe-output.patch 19. Qwen token identity, empty STOP failures and Responses terminal events
 src/patch_load_pread.py          15. pread checkpoint tensors <= 64 MiB instead of mmap views     VLLM_LOAD_PREAD=0 disables
                                      (never the PLE table; needs 14)
 src/patch_moe_name_index.py      16. indexed FusedMoE expert-name matching (~30 s of Python)        VLLM_MOE_NAME_INDEX=0 disables
@@ -1023,6 +1054,7 @@ docker run --rm -v "$PWD/src:/t" -w /t --entrypoint python3 qwen38-flash-dgx:v0.
 - `COMPILE_CACHE`, the persistent compile cache: **[@AronRubin](https://github.com/AronRubin)** (PR #21).
 - The pointer to NVIDIA's own NVFP4 checkpoint: **[@PathosEthosLogos](https://github.com/PathosEthosLogos)** (issue #17).
 - `tools/vllm_watch.py`, the live session viewer: **[@0x3dlux](https://github.com/0x3dlux)** (issue #12).
+- Qwen token-identity and Responses output-integrity fixes (patch 19), with the source bundle and regression fixtures: **[@Chaos2522](https://github.com/Chaos2522)** ([issue #31](https://github.com/blazux/qwen3.8-Flash-DGX/issues/31#issuecomment-6191209070)); adapted here for vLLM v0.31.
 - The nudge to port the recipe to the vLLM releases (v0.29, then v0.30): **[@ChengYen-Tang](https://github.com/ChengYen-Tang)** (issue #14).
 
 - The two ideas behind the reduced draft vocabulary and the `MADV_RANDOM` table advice come

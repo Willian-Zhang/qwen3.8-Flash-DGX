@@ -1,0 +1,9 @@
+{
+  "author": "Chaos2522",
+  "comment": "https://github.com/blazux/qwen3.8-Flash-DGX/issues/31#issuecomment-6191209070",
+  "archive_sha256": "61f785ac1260d89a785f266412e57bbfb5c120c84bba9b8a740f8efb030d1276",
+  "adaptations": [
+    "Initialize enable_per_request_metrics=False in bare service fixtures for vLLM v0.31; assertions unchanged."
+  ],
+  "source_only_qa": true
+}
