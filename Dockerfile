@@ -2,7 +2,8 @@
 #   1 PLE mmap, 2 GB10 FLA fixes, 4 prefix-caching block_size fix, 5 exact top-k, 6 hybrid mode,
 #   8 deterministic top-k kernel, 10 reduced draft vocabulary, 12 Qwen tool preamble fix,
 #   13 quoted Qwen tool markers stay text, 14 MoE weight-load clone (#33), 15-18 the rest of weight
-#   loading (pread, chunked embedding copy, MTP name prefilter), 19 token identity and Responses output.
+#   loading (pread, chunked embedding copy, MTP name prefilter), 19 token identity and Responses output,
+#   20 isolate the MTP drafter from target auxiliary outputs.
 # Upstream now: 3 (vllm#50729), 7 (vllm#55557), 9 (vllm#52775),
 # 11 (vllm#55513), 16 (vllm#58720). Older bases remain in git history.
 #
@@ -114,3 +115,9 @@ RUN python3 /tmp/patch_load_pread.py ${SP} \
  && python3 /tmp/patch_embed_chunked_copy.py ${SP} && python3 /tmp/patch_mtp_name_prefilter.py ${SP} \
  && rm /tmp/patch_load_pread.py /tmp/patch_embed_chunked_copy.py \
        /tmp/patch_mtp_name_prefilter.py
+
+# --- 20. Routed-expert auxiliary outputs belong to the target, not MTP (issue #55) ---
+# Diagnosis/fix reported by @rp-tn. Keep target capture enabled; clear only the draft copy.
+COPY src/patches/qwen-mtp-aux-output.patch /tmp/qwen-mtp-aux-output.patch
+RUN cd ${SP} && patch --batch --forward --fuzz=0 -p1 < /tmp/qwen-mtp-aux-output.patch \
+ && rm /tmp/qwen-mtp-aux-output.patch

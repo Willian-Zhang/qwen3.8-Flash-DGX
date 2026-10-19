@@ -1,0 +1,19 @@
+--- a/vllm/models/qwen4_exp/nvidia/mtp.py
++++ b/vllm/models/qwen4_exp/nvidia/mtp.py
+@@ -20,6 +20,7 @@
+ from torch import nn
+ 
+ from vllm.config import VllmConfig, replace, set_current_vllm_config
++from vllm.config.aux_output import AuxOutputConfig
+ from vllm.distributed import get_pp_group
+ from vllm.model_executor.layers.fused_moe.utils import (
+     is_model_fused_shared_expert_compatible,
+@@ -159,6 +160,8 @@
+     draft_vllm_config = replace(
+         vllm_config,
+         model_config=speculative_config.draft_model_config,
++        # Auxiliary outputs belong to the target runner, not the MTP drafter.
++        aux_output_config=AuxOutputConfig(),
+     )
+     # VllmConfig post-init derives the target quant config, so restore the
+     # independently resolved draft quant config after replacement.

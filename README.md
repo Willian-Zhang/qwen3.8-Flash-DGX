@@ -142,8 +142,14 @@ ported to vLLM v0.31 as patch 19:
 
 Chat Completions keeps incremental tool-argument streaming. Responses buffers
 converted XML arguments until the call closes so truncated calls do not emit
-unfinished JSON. These fixes change parsing and error reporting; they do not
-prevent the model from emitting EOS early.
+unfinished JSON. Chat Completions also keeps its original tool-name contract:
+unoffered names are returned unchanged for the client to reject or recover from,
+while known `functions.` / `tools.` aliases resolve to an offered name. Clients
+must validate tool names before execution. Responses enforces the offered-name
+list and reports invalid calls as failures. This API distinction avoids turning
+a rejected Chat tool call into an empty successful turn (issue #56).
+These fixes change parsing and error reporting; they do not prevent the model
+from emitting EOS early.
 
 Validated on GX10: **67/67 targeted methods and 21/21 literal-byte fixtures**,
 no additional failures in 4,782 parser-engine cases, and real-inference checks of
@@ -156,6 +162,19 @@ To update an existing installation, rebuild with
 `docker build -t qwen38-flash-dgx:v0.31 .`, then recreate the container with your
 usual profile and overrides. `./flash setup` reuses an existing v0.31 image and
 does not rebuild it for source-only fixes.
+
+### Routed-expert output with MTP (issue #55)
+
+Patch 20 fixes v0.31's draft-config copy when MTP is combined with
+`--enable-return-routed-experts`: only the target keeps auxiliary-output capture;
+the MTP drafter receives a fresh disabled auxiliary-output configuration. This
+avoids the draft's `AuxOutput Connector only supports generate runners` error.
+The target's other routed-expert compatibility requirements still apply.
+Diagnosis and the proposed fix were contributed by
+[@rp-tn](https://github.com/rp-tn) in [issue #55](https://github.com/blazux/qwen3.8-Flash-DGX/issues/55).
+The [CPU regression test](tests/test_mtp_aux_output_cpu.py) checks the config copy
+and vLLM's actual compatibility guard; it does not exercise GPU boot or delivery
+of routed-expert output.
 
 ## Update 2026-10-08 — vLLM v0.31 is the current base
 
@@ -991,6 +1010,7 @@ src/patch_moe_load_clone.py      14. clone mmap-backed expert weights before the
                                      (main weight load 541 -> 150 s on a Spark; docs/HOW-IT-WORKS.md)
 src/patches/qwen-tool-*.patch    12, 13. Qwen tool-marker fixes in the parser engine (+ their test modules)
 src/patches/qwen-safe-output.patch 19. Qwen token identity, empty STOP failures and Responses terminal events
+src/patches/qwen-mtp-aux-output.patch 20. keep target auxiliary outputs out of the MTP draft config
 src/patch_load_pread.py          15. pread checkpoint tensors <= 64 MiB instead of mmap views     VLLM_LOAD_PREAD=0 disables
                                      (never the PLE table; needs 14)
 src/patch_moe_name_index.py      16. indexed FusedMoE expert-name matching (~30 s of Python)        VLLM_MOE_NAME_INDEX=0 disables
@@ -1055,6 +1075,7 @@ docker run --rm -v "$PWD/src:/t" -w /t --entrypoint python3 qwen38-flash-dgx:v0.
 - The pointer to NVIDIA's own NVFP4 checkpoint: **[@PathosEthosLogos](https://github.com/PathosEthosLogos)** (issue #17).
 - `tools/vllm_watch.py`, the live session viewer: **[@0x3dlux](https://github.com/0x3dlux)** (issue #12).
 - Qwen token-identity and Responses output-integrity fixes (patch 19), with the source bundle and regression fixtures: **[@Chaos2522](https://github.com/Chaos2522)** ([issue #31](https://github.com/blazux/qwen3.8-Flash-DGX/issues/31#issuecomment-6191209070)); adapted here for vLLM v0.31.
+- MTP/routed-expert draft-config diagnosis and proposed fix (patch 20): **[@rp-tn](https://github.com/rp-tn)** ([issue #55](https://github.com/blazux/qwen3.8-Flash-DGX/issues/55)). Chat tool-name compatibility regression report: **[@FinSnow](https://github.com/FinSnow)** ([issue #56](https://github.com/blazux/qwen3.8-Flash-DGX/issues/56)).
 - The nudge to port the recipe to the vLLM releases (v0.29, then v0.30): **[@ChengYen-Tang](https://github.com/ChengYen-Tang)** (issue #14).
 
 - The two ideas behind the reduced draft vocabulary and the `MADV_RANDOM` table advice come

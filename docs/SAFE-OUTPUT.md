@@ -19,7 +19,7 @@ Archive provenance and the eight source-file hashes are in
 - LENGTH keeps incomplete status and emits `response.incomplete`, rather than
   `response.completed` with an incomplete payload. The declared event schema
   and background replay recognize all three terminal outcomes.
-- The bundle also hardens Qwen tool-name validation, known-namespace handling,
+- Responses also hardens Qwen tool-name validation. The parser handles known namespaces,
   reasoning/tool transitions and malformed-opener recovery. Unknown names are
   not mapped arbitrarily to an offered tool.
 
@@ -35,6 +35,39 @@ MTP or serving limits. It cannot recover content the model never generated,
 prevent premature EOS, or decide whether a nonempty final sentence means a task
 is actually finished. The contributor's optional native sampler guard is not
 included.
+
+## Chat Completions compatibility follow-up (issue #56)
+
+Patch 19 initially enforced the offered-name list for both APIs. With synthetic
+engine frames passed through the installed Chat Completions producer, an
+unoffered call became an empty turn ending in `stop`; an unoffered call followed
+by a valid call could leave the first delivered tool at index 1. Before patch 19,
+Chat Completions returned the unoffered name and used `tool_calls`, allowing the
+client to handle an unavailable tool.
+
+The follow-up restores that Chat contract for syntactically valid tool names.
+Known offered names and namespace aliases resolve first; an unknown name is
+passed through unchanged, never remapped to an offered function. Clients must
+validate tool names before executing calls. Responses retains strict validation
+and its explicit failure events. The choice is per parser/request, leaving the
+shared cached configuration untouched. Rejection diagnostics include a bounded,
+escaped tool name without logging arguments.
+
+The `GenerationError` checks cited in the issue belong to Responses serving,
+not Chat Completions. The installed Chat generator completed the synthetic
+reproductions with a normal `[DONE]`; a cross-request server abort was not
+reproduced. The compatibility tests cover the empty-turn change, call indices,
+full/streaming parity, namespace resolution, preserved reasoning examples and
+independent concurrent streams. They exercise actual installed serving code
+with synthetic engine frames, not Open WebUI or long-context model inference.
+The follow-up has 10 Chat compatibility regression methods; patch 20 has four
+separate MTP configuration checks. These supplement the original patch-19 suite
+below; its GPU measurements describe the original port, not this follow-up.
+On the isolated GX10 CPU image, all 10 + 4 checks pass, the original 67 methods
+and 21 byte fixtures still pass, and the official parser-engine result remains
+4,781/4,782 with exactly the pre-existing failure documented below. The MTP test
+reproduces the inherited-aux configuration error on the old image and clears it
+with the fix; it does not exercise GPU model startup.
 
 ## GX10 validation, 2026-10-15–16
 
