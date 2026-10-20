@@ -1,0 +1,361 @@
+--- a/vllm/parser/engine/parser_engine.py
++++ b/vllm/parser/engine/parser_engine.py
+@@ -997,6 +997,8 @@
+         if name is not None:
+             slot.name = name
+         remaining = self._flush_arg_converter(idx)
++        if self._arguments_block_emission(idx):
++            return
+ 
+         if not slot.name_sent:
+             if name is not None:
+@@ -1063,6 +1065,18 @@
+ 
+     # ── Arg conversion helpers ─────────────────────────────────────────
+ 
++    def _normalize_tool_arguments(self, value: str, name: str, idx: int) -> str | None:
++        return value
++
++    def _arguments_block_emission(self, idx: int) -> bool:
++        return False
++
++    def _skip_incomplete_tool_slot(self, idx: int) -> bool:
++        return False
++
++    def _buffer_ambiguous_arguments(self, idx: int, value: str) -> bool:
++        return False
++
+     def _compute_arg_delta(self, idx: int, raw_delta: str) -> str | None:
+         converter = self._arg_converter
+         if converter is None:
+@@ -1088,6 +1102,8 @@
+         if slot.name:
+             current_json = self._fix_arg_types(current_json, slot.name)
+ 
++        if self._buffer_ambiguous_arguments(idx, current_json):
++            return None
+         prev = slot.streamed_json
+         safe_json = self._safe_arg_prefix(current_json, slot.string_keys)
+ 
+@@ -1120,6 +1136,9 @@
+ 
+         if final_json:
+             final_json = self._fix_arg_types(final_json, slot.name)
++            final_json = self._normalize_tool_arguments(final_json, slot.name, idx)
++            if final_json is None:
++                return None
+ 
+         prev = slot.streamed_json
+         if final_json and len(final_json) > len(prev):
+@@ -1153,6 +1172,8 @@
+ 
+         tool_calls: list[ToolCall] = []
+         for idx, slot in enumerate(self._tool_slots):
++            if self._skip_incomplete_tool_slot(idx):
++                continue
+             if not slot.name and not slot.args:
+                 continue
+ 
+@@ -1184,6 +1205,9 @@
+                 slot.name = name
+                 self._ensure_tool_id(slot, name)
+                 args_json = self._fix_arg_types(args_json, name)
++                args_json = self._normalize_tool_arguments(args_json, name, idx)
++                if args_json is None:
++                    continue
+                 tool_calls.append(
+                     ToolCall(
+                         id=slot.id,
+--- a/vllm/parser/qwen3.py
++++ b/vllm/parser/qwen3.py
+@@ -294,6 +294,10 @@
+         if self.parser_engine_config.defer_reasoning_tool_start:
+             self._engine.defer_reasoning_tool_start = False
+         self._chat_tool_name_passthrough = False
++        self._schema_arguments_strict = False
++        self._invalid_argument_slots = set()
++        self._schema_catalog = None
++        self._argument_schemas = {}
+ 
+     def _check_skip_tool_parsing(
+         self, request: ChatCompletionRequest | ResponsesRequest
+@@ -313,6 +317,7 @@
+         # client receives an unoffered name and can reject/recover the call.
+         # Responses retains its explicit failure policy. Keep this per-parser,
+         # never mutate the cached configuration shared by concurrent requests.
++        self._schema_arguments_strict = isinstance(request, ResponsesRequest)
+         self._chat_tool_name_passthrough = (
+             self.parser_engine_config.name == "qwen3"
+             and not isinstance(request, ResponsesRequest)
+@@ -329,6 +334,85 @@
+                 # offered shell/file tool. Known aliases were resolved above.
+                 return stripped
+         return None
++
++    def _reset(self, initial_state=None) -> None:
++        super()._reset(initial_state=initial_state)
++        self._invalid_argument_slots = set()
++
++    @property
++    def has_invalid_tool_arguments(self):
++        return bool(self._invalid_argument_slots)
++
++    def _schema_for_tool(self, name):
++        if self.parser_engine_config.name != "qwen3":
++            return None
++        from vllm.parser.engine.argument_validation import find_parameters
++        if self._schema_catalog is not self._tools:
++            self._schema_catalog = self._tools
++            self._argument_schemas = {}
++        if name not in self._argument_schemas:
++            self._argument_schemas[name] = find_parameters(self._tools, name)
++        return self._argument_schemas[name]
++
++    def _normalize_tool_arguments(self, value, name, idx):
++        from vllm.parser.engine.argument_validation import InvalidToolArguments, validate_or_unwrap
++        schema = self._schema_for_tool(name)
++        if schema is None:
++            return value
++        try:
++            return validate_or_unwrap(value, schema)
++        except InvalidToolArguments:
++            if not self._schema_arguments_strict:
++                # Chat clients retain their previous argument-error/recovery path.
++                return value
++            self._invalid_argument_slots.add(idx)
++            self._tool_slots[idx].rejection_logged = True
++            return None
++
++    def _arguments_block_emission(self, idx):
++        return idx in self._invalid_argument_slots
++
++    def _skip_incomplete_tool_slot(self, idx):
++        slot = self._tool_slots[idx]
++        return self._arguments_block_emission(idx) or (
++            self._schema_arguments_strict and not slot.closed_explicitly
++            and self._schema_for_tool(slot.name) is not None
++        )
++
++    def _buffer_ambiguous_arguments(self, idx, value):
++        # Normal Chat calls keep incremental arguments. Only a possible wrapper
++        # waits for closure, since emitted argument bytes cannot be rewritten.
++        slot = self._tool_slots[idx]
++        if self._schema_for_tool(slot.name) is None:
++            return False
++        try:
++            parsed = json.loads(value)
++        except (ValueError, TypeError):
++            return False
++        return isinstance(parsed, dict) and set(parsed) == {"arguments"}
++
++    def _emit_name_delta(self, idx, deltas, name):
++        slot = self._tool_slots[idx]
++        resolved = self._resolve_tool_name(name or "") or name or ""
++        if (self._schema_arguments_strict and not slot.closed_explicitly
++                and self._schema_for_tool(resolved) is not None):
++            return
++        return super()._emit_name_delta(idx, deltas, name)
++
++    def _handle_tool_end(self, event, deltas):
++        idx = event.tool_index
++        if idx >= len(self._tool_slots):
++            return
++        slot = self._tool_slots[idx]
++        slot.closed_explicitly = slot.closed_explicitly or event.value in (
++            self.parser_engine_config.terminals.get("FUNC_END"),
++            self.parser_engine_config.terminals.get("TOOL_END"),
++        )
++        name = self._resolve_tool_name(slot.name or self._try_extract_name(idx) or "")
++        if (self._schema_arguments_strict and not slot.closed_explicitly
++                and self._schema_for_tool(name or "") is not None):
++            return
++        return super()._handle_tool_end(event, deltas)
+ 
+     def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
+         if not self.parser_engine_config.defer_reasoning_tool_start:
+--- a/vllm/parser/engine/adapters.py
++++ b/vllm/parser/engine/adapters.py
+@@ -57,6 +57,20 @@
+     def has_unresolved_reasoning_tool_candidate(self) -> bool:
+         """Preserve unresolved reasoning state through the reasoning adapter."""
+         return self._parser_engine.has_unresolved_reasoning_tool_candidate
++
++    def prepare_tool_argument_schema(self, request):
++        engine = self._parser_engine
++        if engine.parser_engine_config.name == "qwen3":
++            engine._tools = getattr(request, "tools", None)
++            engine._check_skip_tool_parsing(request)
++
++    @property
++    def has_rejected_tool_calls(self):
++        return self._parser_engine.has_rejected_tool_calls
++
++    @property
++    def has_invalid_tool_arguments(self):
++        return bool(getattr(self._parser_engine, "has_invalid_tool_arguments", False))
+ 
+     @contextmanager
+     def _skip_tool_parsing(self) -> Iterator[None]:
+@@ -195,6 +209,10 @@
+     def has_rejected_tool_calls(self) -> bool:
+         """Preserve rejection state when an engine is used as a tool parser."""
+         return self._parser_engine.has_rejected_tool_calls
++
++    @property
++    def has_invalid_tool_arguments(self):
++        return bool(getattr(self._parser_engine, "has_invalid_tool_arguments", False))
+ 
+     @property
+     def skip_reasoning_parsing(self) -> bool:
+--- a/vllm/parser/abstract_parser.py
++++ b/vllm/parser/abstract_parser.py
+@@ -331,7 +331,8 @@
+     @property
+     def has_rejected_tool_calls(self) -> bool:
+         """Expose tool rejection through the composed serving-layer parser."""
+-        return bool(getattr(self._tool_parser, "has_rejected_tool_calls", False))
++        return any(bool(getattr(parser, "has_rejected_tool_calls", False))
++                   for parser in (self._tool_parser, self._reasoning_parser))
+ 
+     def extract_reasoning(
+         self,
+@@ -341,6 +342,11 @@
+         if self._reasoning_parser is None:
+             return None, model_output
+         return self._reasoning_parser.extract_reasoning(model_output, request)
++
++    @property
++    def has_invalid_tool_arguments(self):
++        return any(bool(getattr(parser, "has_invalid_tool_arguments", False))
++                   for parser in (self._tool_parser, self._reasoning_parser))
+ 
+     def _get_function_name(
+         self, request: ChatCompletionRequest | ResponsesRequest
+@@ -881,6 +887,9 @@
+     ) -> DeltaMessage | None:
+         self._initialize_history_tool_call_cnt(request)
+         state = self._stream_state
++        prepare_schema = getattr(self._reasoning_parser, "prepare_tool_argument_schema", None)
++        if prepare_schema is not None:
++            prepare_schema(request)
+ 
+         if not state.prompt_reasoning_checked and prompt_token_ids is not None:
+             state.prompt_reasoning_checked = True
+--- a/vllm/entrypoints/openai/responses/serving.py
++++ b/vllm/entrypoints/openai/responses/serving.py
+@@ -1029,6 +1029,8 @@
+                 enable_auto_tools=self.enable_auto_tools,
+                 model_output_token_ids=final_output.token_ids,
+             )
++            if getattr(parser, "has_invalid_tool_arguments", False):
++                raise GenerationError("Model generated arguments that violate the offered tool schema")
+             if getattr(parser, "has_rejected_tool_calls", False):
+                 raise GenerationError("Model generated a tool call absent from offered tools")
+             if (
+@@ -1272,6 +1274,8 @@
+             else:
+                 delta_message = DeltaMessage(content=output.text)
+ 
++            if getattr(ctx.response_parser, "has_invalid_tool_arguments", False):
++                raise GenerationError("Model generated arguments that violate the offered tool schema")
+             if getattr(ctx.response_parser, "has_rejected_tool_calls", False):
+                 raise GenerationError("Model generated a tool call absent from offered tools")
+             has_nonreasoning_output = has_nonreasoning_output or bool(
+--- a/vllm/parser/engine/argument_validation.py
++++ b/vllm/parser/engine/argument_validation.py
+@@ -0,0 +1,95 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++"""Schema-authoritative, single-layer repair of an accidental arguments wrapper."""
++from __future__ import annotations
++
++import json
++from jsonschema.exceptions import SchemaError, ValidationError
++from jsonschema.validators import validator_for
++from referencing import Registry
++from referencing.exceptions import Unresolvable
++
++
++class InvalidToolArguments(ValueError):
++    """No executable tool call may be emitted; exception never carries payloads."""
++
++
++def _pairs(pairs):
++    result = {}
++    for key, value in pairs:
++        if key in result:
++            raise ValueError("Duplicate JSON object key")
++        result[key] = value
++    return result
++
++
++def _constant(value):
++    raise ValueError("Non-JSON numeric constant")
++
++
++def _loads(value):
++    return json.loads(value, object_pairs_hook=_pairs, parse_constant=_constant)
++
++
++def find_parameters(tools, canonical_name):
++    """Use only the exact already-resolved offered function/namespace name."""
++    matches = []
++    for tool in tools or []:
++        item = tool.model_dump() if hasattr(tool, "model_dump") else tool
++        if not isinstance(item, dict):
++            continue
++        if item.get("type") == "namespace":
++            namespace = item.get("name")
++            for child in item.get("tools", []):
++                if (child.get("type") == "function" and namespace
++                        and namespace + "__" + child.get("name", "") == canonical_name):
++                    matches.append(child.get("parameters"))
++        elif item.get("type") == "function":
++            function = item.get("function", item)
++            if function.get("name") == canonical_name:
++                matches.append(function.get("parameters"))
++    # Duplicate names cannot authorize a schema-based transformation.
++    if len(matches) != 1:
++        return None
++    return matches[0]
++
++
++def validate_or_unwrap(arguments_json, schema):
++    """Preserve valid input exactly; otherwise unwrap once only on full proof.
++
++    An absent schema preserves legacy input, with no inferred requirements or
++    wrapper repair. Unknown/unresolvable supplied schemas fail visibly. No
++    network $ref retrieval, recursive unwrap, coercion or parameter guessing.
++    """
++    if schema is None:
++        return arguments_json
++    try:
++        if isinstance(schema, dict) and "$schema" in schema:
++            validator_cls = validator_for(schema, default=None)
++            if validator_cls is None:
++                raise InvalidToolArguments("Unsupported tool argument schema dialect")
++        else:
++            validator_cls = validator_for(schema)
++        validator_cls.check_schema(schema)
++        # Registry() refuses remote retrieval; local definitions still work.
++        validator = validator_cls(schema, registry=Registry())
++        original = _loads(arguments_json)
++        try:
++            validator.validate(original)
++            return arguments_json
++        except ValidationError:
++            pass
++        if not isinstance(original, dict) or set(original) != {"arguments"}:
++            raise InvalidToolArguments("Tool arguments violate offered schema")
++        inner = original["arguments"]
++        if isinstance(inner, str):
++            inner = _loads(inner)
++        if not isinstance(inner, dict):
++            raise InvalidToolArguments("Tool arguments violate offered schema")
++        validator.validate(inner)
++        return json.dumps(inner, ensure_ascii=False, allow_nan=False)
++    except InvalidToolArguments:
++        raise
++    except (SchemaError, ValidationError, Unresolvable, ValueError, TypeError,
++            KeyError, RecursionError):
++        raise InvalidToolArguments("Tool arguments cannot be validated against offered schema") from None

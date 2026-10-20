@@ -1,11 +1,12 @@
-# Qwen parser and Responses output integrity (patch 19)
+# Qwen parser and Responses output integrity (patches 19 and 21)
 
 Patch 19 ports [Chaos2522's review2 source bundle](https://github.com/blazux/qwen3.8-Flash-DGX/issues/31#issuecomment-6191209070)
 from vLLM v0.30 to the recipe's v0.31.0 base. It applies after patches 12 and 13.
 Credit for the original fixes and regression fixtures belongs to Chaos2522.
-Archive provenance and the eight source-file hashes are in
+Archive provenance and the eight patch-19 source-file hashes are in
 [`SOURCE.json`](../tests/issue31_safe_output/SOURCE.json) and
 [`PORT-MANIFEST.json`](../tests/issue31_safe_output/PORT-MANIFEST.json).
+The patch-21 follow-up and current installed hashes are described below.
 
 ## Behavior
 
@@ -69,7 +70,53 @@ and 21 byte fixtures still pass, and the official parser-engine result remains
 reproduces the inherited-aux configuration error on the old image and clears it
 with the fix; it does not exercise GPU model startup.
 
-## GX10 validation, 2026-10-15–16
+## Schema-authoritative tool arguments (patch 21)
+
+Patch 21 ports the bounded argument normalization from
+[Chaos2522's schema2 bundle](https://github.com/blazux/qwen3.8-Flash-DGX/issues/31#issuecomment-6291191080)
+to the existing v0.31 implementation. The original `argument_validation.py` helper
+is copied unchanged; adapters and serving checks are integrated with patch 19 and
+the issue #56 Chat compatibility contract. This is not a wholesale replacement
+with the bundle's ten runtime files.
+
+The uniquely offered tool schema is authoritative. An original payload that
+already validates is preserved exactly. Otherwise, only a sole `arguments`
+wrapper may be decoded once, and only if its inner object validates in full.
+Missing or ambiguous schemas do not authorize repair. Legitimate `arguments`
+properties, sibling properties, required fields, nested types and local schema
+references are covered. Duplicate JSON keys, nonfinite values and unsupported
+schemas cannot authorize repair; remote schema references are never fetched.
+
+Responses withholds known-schema calls until explicit closure and validation,
+then either emits the valid call or reports a schema-specific error before an
+executable function-call item. LENGTH without a closer stays incomplete. Chat
+retains its invalid-argument client recovery and unknown-name passthrough. Normal
+Chat arguments still stream incrementally; possible wrappers wait until closure.
+The schema catalog is per parser/request and cached without reusing a prior
+request's schema. Implicit reasoning-to-tool transitions use the same checks.
+
+GX10 installed-code CPU checks on 2026-10-20 give **22/23 author schema methods,
+11/11 producer integration methods, 10/10 Chat compatibility methods, 67/67 prior
+regression methods and 21/21 byte-fidelity cases**. The author's assertions are
+retained with a v0.31 fixture adapter. Its namespace test expects dotted aliases
+already rejected by the reference; the canonical `namespace__function` form
+works in both arms and is repaired by the candidate. The official parser-engine
+suite remains **4,781/4,782**, with the same pre-existing literal-marker failure
+documented below. No new failures were introduced in this matrix.
+
+These checks use synthetic engine frames through installed parser and serving
+code, without runtime source overlays, model inference or tool execution. The
+author's full 63-test matrix, live Codex execution, GPU performance and long-context
+generations have not been validated for this port. The older GPU/tournament
+measurements below describe patch 19, not patch 21. No EOS or model-quality
+improvement is claimed.
+
+See the [runner and known failures](../tests/issue31_schema_arguments/README.md),
+[provenance](../tests/issue31_schema_arguments/SOURCE.json),
+[current installed hashes](../tests/issue31_schema_arguments/PORT-MANIFEST.json)
+and [recorded validation](../tests/issue31_schema_arguments/VALIDATION.json).
+
+## GX10 validation, 2026-10-15–16 (patch 19)
 
 The comparison used vLLM v0.31.0, the NVIDIA hybrid checkpoint, MTP=2,
 YaRN 500k, prefix caching, PLE prewarm, CPUSET `5-9,15-19`, 16 sequences,

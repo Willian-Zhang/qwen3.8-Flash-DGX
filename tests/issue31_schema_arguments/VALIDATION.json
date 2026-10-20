@@ -1,0 +1,58 @@
+{
+  "date": "2026-10-20",
+  "vllm_version": "0.31.0",
+  "candidate_image_id": "sha256:74b644c8e02b01c1390928022a6dc0f4da6c4219b1a81092baef3845909074de",
+  "execution": {
+    "cpu_only": true,
+    "model_inference": false,
+    "tool_execution": false,
+    "source_overlay": false,
+    "network": false
+  },
+  "baseline_reproduction": "An accidental arguments JSON-string wrapper reaches Chat and Responses clients; the candidate unwraps one layer using the uniquely offered schema. Streaming token chunk sizes 1, 7 and 100000, plus full responses.",
+  "author_schema": {
+    "methods": 23,
+    "passed": 22,
+    "failed": 1,
+    "known_failure": "ArgumentSchema.test_namespace_uses_exact_offered_schema",
+    "reason": "Dotted namespace aliases are already rejected on the reference; canonical namespace__function works and is repaired."
+  },
+  "v031_integration": {
+    "methods": 11,
+    "passed": 11
+  },
+  "chat_compatibility": {
+    "methods": 10,
+    "passed": 10
+  },
+  "previous_patch_regressions": {
+    "methods": 67,
+    "passed": 67,
+    "literal_byte_cases": 21,
+    "literal_byte_passed": 21
+  },
+  "upstream_parser_engine": {
+    "methods": 4782,
+    "passed": 4781,
+    "failed": 1,
+    "same_failure_as_baseline": true,
+    "known_failure": "TestTruncatedToolOpenerStreamParity.test_content_around_unpromoted_tool_block_stays_ordered",
+    "reason": "The existing literal-marker guard preserves malformed marker text that upstream expects to disappear."
+  },
+  "new_failures": 0,
+  "limits": [
+    "The author complete 63-test matrix is not claimed as validated.",
+    "No live model inference, Codex CLI workflow, GPU throughput, tournament or long-context validation for patch 21.",
+    "No premature-EOS fix or model-quality improvement claimed."
+  ],
+  "recipe_integration": {
+    "image_id": "sha256:03846a86b70ee7033c18dc33dbd7bbc0586948215bfd28756f517723fbbc5608",
+    "dockerfile_patch21_block_build_passed": true,
+    "installed_hashes_verified": 9,
+    "author_schema_passed": 22,
+    "author_schema_expected_failures": 1,
+    "integration_passed": 11,
+    "chat_compatibility_passed": 10,
+    "unexpected_failures": 0
+  }
+}

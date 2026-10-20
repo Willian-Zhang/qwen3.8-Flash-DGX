@@ -67,6 +67,7 @@ Everything below is the long version: what was broken on GB10, what was fixed, a
 
 | Date | Change |
 |---|---|
+| 2026-10-20 | **Schema-validated tool arguments:** patch 21 ports **[@Chaos2522](https://github.com/Chaos2522)**'s repair for accidental `arguments` wrappers to v0.31, preserving valid payloads and Chat compatibility ([#31](https://github.com/blazux/qwen3.8-Flash-DGX/issues/31#issuecomment-6291191080)). [Behavior and validation](#schema-validated-tool-arguments-issue-31). |
 | 2026-10-19 | **MTP + routed-expert output:** patch 20 clears auxiliary outputs only on the MTP draft config, fixing the inherited-config error. Thanks to **[@rp-tn](https://github.com/rp-tn)** for the diagnosis and patch ([#55](https://github.com/blazux/qwen3.8-Flash-DGX/issues/55)); [details and test scope](#routed-expert-output-with-mtp-issue-55). |
 | 2026-10-19 | **Chat tool-name compatibility:** restore unoffered-name passthrough for Chat Completions while keeping Responses strict, following **[@FinSnow](https://github.com/FinSnow)**'s report ([#56](https://github.com/blazux/qwen3.8-Flash-DGX/issues/56)). [Behavior and validation](docs/SAFE-OUTPUT.md#chat-completions-compatibility-follow-up-issue-56). |
 | 2026-10-16 | **Parser and Responses integrity:** patch 19 ports **[@Chaos2522](https://github.com/Chaos2522)**'s fixes for token identity, empty STOP and incomplete terminal events to v0.31 ([#31](https://github.com/blazux/qwen3.8-Flash-DGX/issues/31)). [Details](#parser-and-responses-output-fixes-issue-31). |
@@ -134,6 +135,7 @@ patch --batch --forward --fuzz=0 -p1 < /path/to/qwen3.8-Flash-DGX/src/patches/qw
 patch --batch --forward --fuzz=0 -p1 < /path/to/qwen3.8-Flash-DGX/src/patches/qwen-tool-marker-guard.patch
 patch --batch --forward --fuzz=0 -p1 < /path/to/qwen3.8-Flash-DGX/src/patches/qwen-tool-marker-guard-tests.patch
 patch --batch --forward --fuzz=0 -p1 < /path/to/qwen3.8-Flash-DGX/src/patches/qwen-safe-output.patch
+patch --batch --forward --fuzz=0 -p1 < /path/to/qwen3.8-Flash-DGX/src/patches/qwen-tool-argument-schema.patch
 .venv/bin/python -m pytest tests/parser/engine -q
 ```
 
@@ -155,7 +157,7 @@ ported to vLLM v0.31 as patch 19:
 - A token-limited Responses generation ends with `response.incomplete`, including
   when the only generated content is hidden reasoning.
 
-Chat Completions keeps incremental tool-argument streaming. Responses buffers
+Chat Completions keeps incremental streaming for normal tool arguments. Responses buffers
 converted XML arguments until the call closes so truncated calls do not emit
 unfinished JSON. Chat Completions also keeps its original tool-name contract:
 unoffered names are returned unchanged for the client to reject or recover from,
@@ -180,6 +182,32 @@ To update an existing installation, rebuild with
 `docker build -t qwen38-flash-dgx:v0.31 .`, then recreate the container with your
 usual profile and overrides. `./flash setup` reuses an existing v0.31 image and
 does not rebuild it for source-only fixes.
+
+### Schema-validated tool arguments (issue #31)
+
+Patch 21 fixes Qwen tool calls that accidentally wrap their parameters in a single
+`arguments` property. For a tool requiring `cmd`, for example,
+`{"arguments":"{\"cmd\":\"printf fixture\"}"}` becomes
+`{"cmd":"printf fixture"}` only when the offered schema validates that repair.
+Already valid payloads, including tools with a legitimate `arguments` parameter,
+remain unchanged. Missing or ambiguous schemas do not trigger inferred repair.
+
+The correction applies to Chat Completions and Responses. Responses reports
+schema-invalid calls as failures before exposing an executable function-call item.
+Chat retains its existing client recovery for invalid arguments and unknown names;
+normal arguments stream incrementally, while a possible wrapper waits for closure.
+
+**Thank you [@Chaos2522](https://github.com/Chaos2522) for the fix and regression
+fixtures**, shared in [issue #31](https://github.com/blazux/qwen3.8-Flash-DGX/issues/31#issuecomment-6291191080).
+This is a targeted v0.31 port. CPU checks pass for **11/11 producer integration
+tests, 10/10 Chat compatibility tests, 67/67 previous regression methods and
+21/21 byte-fidelity cases**. The author's schema suite is **22/23**, with an
+existing dotted-namespace limitation; the parser-engine suite remains
+**4,781/4,782**, with its existing literal-marker test failure. No new failures
+were introduced in these checks. These tests use synthetic engine frames;
+no model-inference, speed or EOS improvement is claimed for patch 21.
+See the [reproduction suite](tests/issue31_schema_arguments/README.md) for details.
+Existing installations need the image rebuild described above.
 
 ### Routed-expert output with MTP (issue #55)
 
@@ -1101,9 +1129,11 @@ src/vllm_fp8_hybrid_modelopt.py   6. NVFP4 experts + fp8 side layers dispatch   
 src/patch_qsa_fp8_kv.py           7. retired local FP8 KV patch; v0.31 uses native upstream support
 src/patch_moe_load_clone.py      14. clone mmap-backed expert weights before the H2D copy          VLLM_LOAD_CLONE=0 disables
                                      (main weight load 541 -> 150 s on a Spark; docs/HOW-IT-WORKS.md)
-src/patches/qwen-tool-*.patch    12, 13. Qwen tool-marker fixes in the parser engine (+ their test modules)
+src/patches/qwen-tool-preamble*.patch / qwen-tool-marker-guard*.patch
+                                12, 13. Qwen tool-marker fixes in the parser engine (+ their test modules)
 src/patches/qwen-safe-output.patch 19. Qwen token identity, empty STOP failures and Responses terminal events
 src/patches/qwen-mtp-aux-output.patch 20. keep target auxiliary outputs out of the MTP draft config
+src/patches/qwen-tool-argument-schema.patch 21. schema-validated repair of accidental arguments wrappers
 src/patch_load_pread.py          15. pread checkpoint tensors <= 64 MiB instead of mmap views     VLLM_LOAD_PREAD=0 disables
                                      (never the PLE table; needs 14)
 src/patch_moe_name_index.py      16. retired local expert-name index; v0.31 uses native upstream support
@@ -1117,6 +1147,7 @@ src/test_load_patches_cpu.py      CPU check of patches 15 and 17 against real ch
 src/test_mtp_prefilter_cpu.py     CPU check of patch 18: the drafter's exact tensor set, on a real snapshot
 tests/test_fp8_kv_read.py         GPU check of patch 7: the fp8 read path matches bf16 bit for bit
 tests/issue31_safe_output/        patch-19 regression fixtures, Chat compatibility checks and client reproduction
+tests/issue31_schema_arguments/   patch-21 schema and producer regressions, provenance and installed-source hashes
 tests/test_mtp_aux_output_cpu.py  patch-20 draft-config isolation and auxiliary-output compatibility checks
 tests/test_prepare_hybrid.py     synthetic checkpoint/index preparation regressions (issue #50)
 tests/test_memory_profile_logging.py CPU checks for the optional startup-memory diagnostic hook
@@ -1175,7 +1206,7 @@ docker run --rm -v "$PWD/src:/t" -w /t --entrypoint python3 qwen38-flash-dgx:v0.
 - `COMPILE_CACHE`, the persistent compile cache: **[@AronRubin](https://github.com/AronRubin)** (PR #21).
 - The pointer to NVIDIA's own NVFP4 checkpoint: **[@PathosEthosLogos](https://github.com/PathosEthosLogos)** (issue #17).
 - `tools/vllm_watch.py`, the live session viewer: **[@0x3dlux](https://github.com/0x3dlux)** (issue #12).
-- Qwen token-identity and Responses output-integrity fixes (patch 19), with the source bundle and regression fixtures: **[@Chaos2522](https://github.com/Chaos2522)** ([issue #31](https://github.com/blazux/qwen3.8-Flash-DGX/issues/31#issuecomment-6191209070)); adapted here for vLLM v0.31.
+- Qwen token-identity and Responses output-integrity fixes (patch 19), and schema-validated tool-argument repair (patch 21), with source bundles and regression fixtures: **[@Chaos2522](https://github.com/Chaos2522)** ([original fixes](https://github.com/blazux/qwen3.8-Flash-DGX/issues/31#issuecomment-6191209070), [schema repair](https://github.com/blazux/qwen3.8-Flash-DGX/issues/31#issuecomment-6291191080)); adapted here for vLLM v0.31. Thank you for the detailed reproductions and follow-up work.
 - MTP/routed-expert draft-config diagnosis and patch (patch 20): **[@rp-tn](https://github.com/rp-tn)** ([issue #55](https://github.com/blazux/qwen3.8-Flash-DGX/issues/55)) — thank you for sharing the fix.
 - Chat tool-name compatibility regression report: **[@FinSnow](https://github.com/FinSnow)** ([issue #56](https://github.com/blazux/qwen3.8-Flash-DGX/issues/56)).
 - CPU pinning, BF16 recurrent-state control, the `concurrent` profile and benchmark suite: **[@aphex3k](https://github.com/aphex3k)** ([PR #54](https://github.com/blazux/qwen3.8-Flash-DGX/pull/54)).

@@ -51,5 +51,6 @@
     "Keep Chat Completions incremental arguments; buffer Responses XML arguments until call closure to preserve complete JSON values.",
     "Preserve Chat Completions passthrough for syntactically valid unoffered names, after offered-name alias resolution; keep Responses strict.",
     "Include a bounded rejected tool name in diagnostics (no arguments)."
-  ]
+  ],
+  "stage": "Patch 19 including issue #56, before patch 21. For current post-21 installed hashes see ../issue31_schema_arguments/PORT-MANIFEST.json."
 }

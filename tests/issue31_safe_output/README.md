@@ -1,8 +1,10 @@
 # Issue #31: vLLM v0.31 parser and Responses regression tests
 
 Port of [Chaos2522's review2 bundle](https://github.com/blazux/qwen3.8-Flash-DGX/issues/31#issuecomment-6191209070).
-Archive provenance is recorded in `SOURCE.json`; installed file hashes and the
-v0.31 upstream commit are in `PORT-MANIFEST.json`.
+Archive provenance is recorded in `SOURCE.json`; patch-19 target hashes and the
+v0.31 upstream commit are in `PORT-MANIFEST.json`. The subsequent patch 21 changes
+five of those files and adds the schema helper; current installed hashes and the
+additional runner are in the [schema-argument suite](../issue31_schema_arguments/README.md).
 
 The patch preserves original token IDs during Qwen3 final parsing, reports an
 empty STOP as a Responses failure, and emits the correct incomplete terminal

@@ -3,7 +3,7 @@
 #   8 deterministic top-k kernel, 10 reduced draft vocabulary, 12 Qwen tool preamble fix,
 #   13 quoted Qwen tool markers stay text, 14 MoE weight-load clone (#33), 15-18 the rest of weight
 #   loading (pread, chunked embedding copy, MTP name prefilter), 19 token identity and Responses output,
-#   20 isolate the MTP drafter from target auxiliary outputs.
+#   20 isolate the MTP drafter from target auxiliary outputs, 21 schema-validated tool arguments.
 # Upstream now: 3 (vllm#50729), 7 (vllm#55557), 9 (vllm#52775),
 # 11 (vllm#55513), 16 (vllm#58720). Older bases remain in git history.
 #
@@ -121,3 +121,11 @@ RUN python3 /tmp/patch_load_pread.py ${SP} \
 COPY src/patches/qwen-mtp-aux-output.patch /tmp/qwen-mtp-aux-output.patch
 RUN cd ${SP} && patch --batch --forward --fuzz=0 -p1 < /tmp/qwen-mtp-aux-output.patch \
  && rm /tmp/qwen-mtp-aux-output.patch
+
+# --- 21. Repair accidental Qwen arguments wrappers using the offered schema (issue #31) ---
+# Ported from Chaos2522's schema2 bundle; requires patch 19 including the #56 follow-up.
+# Keep Chat compatibility and incremental normal arguments; validate Responses before emission.
+COPY src/patches/qwen-tool-argument-schema.patch /tmp/qwen-tool-argument-schema.patch
+RUN cd ${SP} && patch --batch --forward --fuzz=0 -p1 < /tmp/qwen-tool-argument-schema.patch \
+ && python3 -c "import ast, jsonschema, referencing; ast.parse(open('${SP}/vllm/parser/engine/argument_validation.py').read())" \
+ && rm /tmp/qwen-tool-argument-schema.patch

@@ -1,0 +1,13 @@
+Schema-authoritative Qwen tool-argument repair and regression fixtures originally
+supplied by Chaos2522 in issue #31 on 2026-10-20:
+https://github.com/blazux/qwen3.8-Flash-DGX/issues/31#issuecomment-6291191080
+
+The source bundle targets vLLM, licensed under Apache-2.0. Source notices are
+preserved; LICENSE contains the bundled Apache-2.0 license. The argument_validation.py
+helper is copied unchanged. The parser/serving integration and fixtures are adapted
+to qwen3.8-Flash-DGX's vLLM v0.31.0 base and existing Chat compatibility behavior.
+Additional producer integration checks and the QA runner are supplied by this repo.
+
+SOURCE.json records archive provenance and adaptations. PORT-MANIFEST.json records
+the patch inputs, targets, and complete installed parser/Responses target hashes.
+VALIDATION.json distinguishes local validation from the author's full test matrix.
