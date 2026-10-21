@@ -27,7 +27,7 @@
     {
       "path": "vllm/parser/engine/parser_engine.py",
       "base_sha256": "d1075deeb25b4872e92752d7ef0598a07a747afaf2afc56058ec30c6dc1da89a",
-      "target_sha256": "e6df9c5c0caff1a02db40e8e854c7be0ad2776d6f05aa246e10821dfdba127ec"
+      "target_sha256": "64131ef6b2d2ed8b5983bdd4362bf5865885988ff782ec1cb7b0a5a319fe10de"
     },
     {
       "path": "vllm/parser/engine/parser_engine_config.py",
@@ -42,12 +42,15 @@
     {
       "path": "vllm/parser/qwen3.py",
       "base_sha256": "f91dcde88cb45568098acb2b39dda40c20ecfb00b4db9fd173071d9ca305105b",
-      "target_sha256": "a80410c3831e2be3f91322251c0cf9c844328be1c5ccca7e90bb0eeceaff7125"
+      "target_sha256": "60df6e54aba893763eabbe1d7c4923eaae1cbeb1a776acc85dcf3e4098a42cd8"
     }
   ],
   "adaptations": [
     "Preserve v0.31 upstream changes through three-way source merge.",
     "Limit ID-aware final replay to the Qwen3 reasoning engine.",
-    "Keep Chat Completions incremental arguments; buffer Responses XML arguments until call closure to preserve complete JSON values."
-  ]
+    "Keep Chat Completions incremental arguments; buffer Responses XML arguments until call closure to preserve complete JSON values.",
+    "Preserve Chat Completions passthrough for syntactically valid unoffered names, after offered-name alias resolution; keep Responses strict.",
+    "Include a bounded rejected tool name in diagnostics (no arguments)."
+  ],
+  "stage": "Patch 19 including issue #56, before patch 21. For current post-21 installed hashes see ../issue31_schema_arguments/PORT-MANIFEST.json."
 }

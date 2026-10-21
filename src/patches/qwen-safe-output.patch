@@ -403,7 +403,7 @@
          if events or self._deferred_content:
              return self._events_to_delta(events, finished=True)
          return None
-@@ -412,8 +420,43 @@
+@@ -412,8 +420,44 @@
              return True
          return find_tool_name(self._tools, name)
  
@@ -425,9 +425,10 @@
 +        slot = self._tool_slots[idx]
 +        if not slot.rejection_logged:
 +            logger.warning(
-+                "Rejected tool call: parser=%s index=%s name absent from offered tools",
++                "Rejected tool call: parser=%s index=%s name=%r absent from offered tools",
 +                self.parser_engine_config.name,
 +                idx,
++                (slot.name or self._try_extract_name(idx) or "")[:256],
 +            )
 +            slot.rejection_logged = True
 +
@@ -448,7 +449,7 @@
  
      # ── Private helpers ─────────────────────────────────────────────
  
-@@ -453,11 +496,14 @@
+@@ -453,11 +497,14 @@
          finished: bool,
      ) -> DeltaMessage | None:
          self._initialize_history_tool_call_cnt(request)
@@ -465,7 +466,7 @@
              self._prompt_streaming_prepared = True
          self._check_skip_tool_parsing(request)
          events = self._feed(delta_text, delta_token_ids)
-@@ -884,7 +930,8 @@
+@@ -884,7 +931,8 @@
          deltas: list[DeltaToolCall],
          name: str | None,
      ) -> None:
@@ -475,7 +476,7 @@
              return
          slot = self._tool_slots[idx]
          slot.name = name
-@@ -939,12 +986,19 @@
+@@ -939,12 +987,19 @@
          if idx >= len(self._tool_slots):
              return
  
@@ -498,7 +499,7 @@
                  slot.name = name
                  slot.name_sent = True
                  slot.string_keys = self._streamable_string_keys(
-@@ -963,6 +1017,8 @@
+@@ -963,6 +1018,8 @@
                      )
                  )
                  remaining = None
@@ -507,7 +508,7 @@
  
          if remaining and slot.name_sent:
              deltas.append(
-@@ -1099,7 +1155,10 @@
+@@ -1099,7 +1156,10 @@
              if not slot.name and not slot.args:
                  continue
  
@@ -519,7 +520,7 @@
              raw_body = slot.args
  
              if not name and raw_body.strip():
-@@ -1119,7 +1178,9 @@
+@@ -1119,7 +1179,9 @@
              else:
                  args_json = "{}"
  
@@ -530,7 +531,7 @@
                  self._ensure_tool_id(slot, name)
                  args_json = self._fix_arg_types(args_json, name)
                  tool_calls.append(
-@@ -1128,6 +1189,8 @@
+@@ -1128,6 +1190,8 @@
                          function=FunctionCall(name=name, arguments=args_json),
                      )
                  )
@@ -865,7 +866,7 @@
                  thinking=self.thinking_enabled,
                  name=self.CONFIG_NAME,
                  think_start=self.THINK_START,
-@@ -241,13 +279,60 @@
+@@ -241,13 +279,81 @@
                  tool_start=self.TOOL_START,
                  tool_end=self.TOOL_END,
                  turn_boundary_tokens=self.TURN_BOUNDARIES,
@@ -885,6 +886,7 @@
          )
 +        if self.parser_engine_config.defer_reasoning_tool_start:
 +            self._engine.defer_reasoning_tool_start = False
++        self._chat_tool_name_passthrough = False
 +
 +    def _check_skip_tool_parsing(
 +        self, request: ChatCompletionRequest | ResponsesRequest
@@ -900,6 +902,26 @@
 +            self.parser_engine_config.stream_arg_deltas
 +            and not isinstance(request, ResponsesRequest)
 +        )
++        # Preserve Chat Completions' pre-patch-19 tool-name contract: the
++        # client receives an unoffered name and can reject/recover the call.
++        # Responses retains its explicit failure policy. Keep this per-parser,
++        # never mutate the cached configuration shared by concurrent requests.
++        self._chat_tool_name_passthrough = (
++            self.parser_engine_config.name == "qwen3"
++            and not isinstance(request, ResponsesRequest)
++        )
++
++    def _resolve_tool_name(self, name: str) -> str | None:
++        resolved = super()._resolve_tool_name(name)
++        if resolved is not None:
++            return resolved
++        if self._chat_tool_name_passthrough:
++            stripped = name.strip()
++            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]*", stripped):
++                # Preserve the actual name; never map unknown tools to an
++                # offered shell/file tool. Known aliases were resolved above.
++                return stripped
++        return None
 +
 +    def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
 +        if not self.parser_engine_config.defer_reasoning_tool_start:
@@ -928,7 +950,7 @@
  
      def extract_reasoning(
          self,
-@@ -256,4 +341,11 @@
+@@ -256,4 +362,11 @@
      ) -> tuple[str | None, str | None]:
          if not self.thinking_enabled:
              return None, model_output

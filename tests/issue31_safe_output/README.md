@@ -1,8 +1,10 @@
 # Issue #31: vLLM v0.31 parser and Responses regression tests
 
 Port of [Chaos2522's review2 bundle](https://github.com/blazux/qwen3.8-Flash-DGX/issues/31#issuecomment-6191209070).
-Archive provenance is recorded in `SOURCE.json`; installed file hashes and the
-v0.31 upstream commit are in `PORT-MANIFEST.json`.
+Archive provenance is recorded in `SOURCE.json`; patch-19 target hashes and the
+v0.31 upstream commit are in `PORT-MANIFEST.json`. The subsequent patch 21 changes
+five of those files and adds the schema helper; current installed hashes and the
+additional runner are in the [schema-argument suite](../issue31_schema_arguments/README.md).
 
 The patch preserves original token IDs during Qwen3 final parsing, reports an
 empty STOP as a Responses failure, and emits the correct incomplete terminal
@@ -10,6 +12,10 @@ event under LENGTH. It does not prevent premature model EOS. Chat Completions
 retains incremental argument streaming; Responses buffers converted XML
 arguments until the function call closes. ID-aware replay is scoped to Qwen3
 so unrelated parser configurations retain their existing path.
+Responses rejects unoffered names explicitly; Chat Completions retains its
+earlier passthrough contract so the client can handle an unavailable tool.
+Known namespace aliases are still resolved first. Clients must validate names
+before executing any tool call.
 
 ## CPU regression suite
 
@@ -63,6 +69,16 @@ without preventing the before/after comparison.
 These synthetic checks complement real-inference Responses probes, throughput
 measurements and the unchanged 55-scenario agentic tournament. Their results
 must not be presented as proof of general model quality or as an EOS fix.
+
+## Chat Completions compatibility (issue #56)
+
+Using the same image, mounts and tokenizer variable as the CPU regression suite,
+run `/qa/chat_compat_tests.py`. It exercises the installed streaming and full
+Chat producers with synthetic engine frames: unknown-name passthrough, offered
+namespace resolution, contiguous call indices, reasoning examples, concurrent
+independent streams, preserved strict Responses behavior and rejection logs.
+No model tokens are generated and no proposed tool is executed. Open WebUI and
+natural long-context generations are outside these tests.
 
 GX10 integration results and the porting differences are recorded in
 [scope and validation](../../docs/SAFE-OUTPUT.md).

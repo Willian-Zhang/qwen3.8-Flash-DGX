@@ -1,0 +1,77 @@
+{
+  "vllm_version": "0.31.0",
+  "upstream_sha": "db9527a46873454610df6dbedf79a36d6bf1a7f6",
+  "patch": 21,
+  "requires": "Patches 12, 13 and 19 including the issue #56 Chat compatibility follow-up.",
+  "base_repository_commit": "cc293bb4ca0d306938615158af06979d0cd2593b",
+  "files": [
+    {
+      "path": "vllm/parser/engine/parser_engine.py",
+      "base_sha256": "64131ef6b2d2ed8b5983bdd4362bf5865885988ff782ec1cb7b0a5a319fe10de",
+      "target_sha256": "7c8bfd8a8fa176e247fd2e6cefa3652e67b6e237e53ae7ea2bc360dc4b53c42d"
+    },
+    {
+      "path": "vllm/parser/qwen3.py",
+      "base_sha256": "60df6e54aba893763eabbe1d7c4923eaae1cbeb1a776acc85dcf3e4098a42cd8",
+      "target_sha256": "28135cc2fcf98212ffa10179ca00197f21c4d2c851f7cc5255010dca984508d5"
+    },
+    {
+      "path": "vllm/parser/engine/adapters.py",
+      "base_sha256": "6424d55a5b30bbd5dfbd1df9a7f2be9e2f1edfff8d40454592bce73dc97ac664",
+      "target_sha256": "f3dd5b70d6705c95cdaf9047915ec705e10025f963b44a066bfee84ea7e354be"
+    },
+    {
+      "path": "vllm/parser/abstract_parser.py",
+      "base_sha256": "29847dc49ce711945fadc8365962f26aa6d0ce7cbef2b1fbb3e1360692f9552a",
+      "target_sha256": "9b511dbcd1afa77b030301319554fb89312d85a71cd9a56f33435c054e2d01ff"
+    },
+    {
+      "path": "vllm/entrypoints/openai/responses/serving.py",
+      "base_sha256": "1265fc53d9c218a4d1980521cda83addb6885e0b95b7c89c05ebcd3c15eadff6",
+      "target_sha256": "e0c0a00d5959ac19c3a9bfbd521cec1d5061c6c76b5b1023b5e5976a54194744"
+    },
+    {
+      "path": "vllm/parser/engine/argument_validation.py",
+      "base_sha256": null,
+      "target_sha256": "b19f87e30239a5912d18053ba1c3428218d8e3849daa165182baf09bf1aafbcb"
+    }
+  ],
+  "installed_files": [
+    {
+      "path": "vllm/entrypoints/openai/responses/protocol.py",
+      "target_sha256": "d808ab994117285a7bd331e66a2ceadf38392fce17ecffbf8ab0e845a998edf1"
+    },
+    {
+      "path": "vllm/entrypoints/openai/responses/serving.py",
+      "target_sha256": "e0c0a00d5959ac19c3a9bfbd521cec1d5061c6c76b5b1023b5e5976a54194744"
+    },
+    {
+      "path": "vllm/parser/abstract_parser.py",
+      "target_sha256": "9b511dbcd1afa77b030301319554fb89312d85a71cd9a56f33435c054e2d01ff"
+    },
+    {
+      "path": "vllm/parser/engine/adapters.py",
+      "target_sha256": "f3dd5b70d6705c95cdaf9047915ec705e10025f963b44a066bfee84ea7e354be"
+    },
+    {
+      "path": "vllm/parser/engine/argument_validation.py",
+      "target_sha256": "b19f87e30239a5912d18053ba1c3428218d8e3849daa165182baf09bf1aafbcb"
+    },
+    {
+      "path": "vllm/parser/engine/parser_engine.py",
+      "target_sha256": "7c8bfd8a8fa176e247fd2e6cefa3652e67b6e237e53ae7ea2bc360dc4b53c42d"
+    },
+    {
+      "path": "vllm/parser/engine/parser_engine_config.py",
+      "target_sha256": "0d14aa575628845240b350357b8dc6e4fc7bc81f93f9ea68b0a3a2a239f89628"
+    },
+    {
+      "path": "vllm/parser/engine/streaming_parser_engine.py",
+      "target_sha256": "2629b370ad564aace8239274f74979440a18e4313e0eef1ac92d9d8fd424569b"
+    },
+    {
+      "path": "vllm/parser/qwen3.py",
+      "target_sha256": "28135cc2fcf98212ffa10179ca00197f21c4d2c851f7cc5255010dca984508d5"
+    }
+  ]
+}

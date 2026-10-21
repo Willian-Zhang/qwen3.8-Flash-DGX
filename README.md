@@ -29,7 +29,7 @@ git clone https://github.com/blazux/qwen3.8-Flash-DGX.git && cd qwen3.8-Flash-DG
 ./flash test        # health, coherence, prefix-cache hit, determinism, tok/s
 ```
 
-Other recipes are one word away: `./flash profiles` lists them (`speed`, `context`, `context-1m`,
+Other recipes are one word away: `./flash profiles` lists them (`speed`, `concurrent`, `context`, `context-1m`,
 `shared`, `published`, `native`), `./flash serve speed` runs one, and any variable can still
 be overridden on the command line (`./flash serve default MTP=3 PORT=18301`). `./flash status`,
 `logs`, `stop`, `start`, `rm` do what they say. Details in [The `flash` command](#the-flash-command).
@@ -62,6 +62,22 @@ Everything below is the long version: what was broken on GB10, what was fixed, a
 > [@jschmied](https://github.com/jschmied) — see
 > [issue #1](https://github.com/blazux/qwen3.8-Flash-DGX/issues/1) and their
 > [write-up](https://github.com/jschmied/qwen38-flash-next-gb10).
+
+## Recent changes
+
+| Date | Change |
+|---|---|
+| 2026-10-20 | **Schema-validated tool arguments:** patch 21 ports **[@Chaos2522](https://github.com/Chaos2522)**'s repair for accidental `arguments` wrappers to v0.31, preserving valid payloads and Chat compatibility ([#31](https://github.com/blazux/qwen3.8-Flash-DGX/issues/31#issuecomment-6291191080)). [Behavior and validation](#schema-validated-tool-arguments-issue-31). |
+| 2026-10-19 | **MTP + routed-expert output:** patch 20 clears auxiliary outputs only on the MTP draft config, fixing the inherited-config error. Thanks to **[@rp-tn](https://github.com/rp-tn)** for the diagnosis and patch ([#55](https://github.com/blazux/qwen3.8-Flash-DGX/issues/55)); [details and test scope](#routed-expert-output-with-mtp-issue-55). |
+| 2026-10-19 | **Chat tool-name compatibility:** restore unoffered-name passthrough for Chat Completions while keeping Responses strict, following **[@FinSnow](https://github.com/FinSnow)**'s report ([#56](https://github.com/blazux/qwen3.8-Flash-DGX/issues/56)). [Behavior and validation](docs/SAFE-OUTPUT.md#chat-completions-compatibility-follow-up-issue-56). |
+| 2026-10-16 | **Parser and Responses integrity:** patch 19 ports **[@Chaos2522](https://github.com/Chaos2522)**'s fixes for token identity, empty STOP and incomplete terminal events to v0.31 ([#31](https://github.com/blazux/qwen3.8-Flash-DGX/issues/31)). [Details](#parser-and-responses-output-fixes-issue-31). |
+| 2026-10-14 | **Concurrent profile and benchmarks:** **[@aphex3k](https://github.com/aphex3k)**'s [PR #54](https://github.com/blazux/qwen3.8-Flash-DGX/pull/54) adds CPU pinning, BF16 recurrent-state control, `concurrent` and the `bench/` suite. Measured aggregate throughput gains are **+21–94% at 8–32 clients** with the tested FP8 KV settings; [configuration, quality results and limits](#measured-concurrent-profile-pr-54). |
+| 2026-10-09 | **Hybrid preparation and memory diagnostics:** support regular-file and hardlinked checkpoint indexes without modifying the original snapshot ([#50](https://github.com/blazux/qwen3.8-Flash-DGX/issues/50)); add [optional startup-memory diagnostics](docs/VLLM-031.md#optional-diagnostic-images) for automatic KV sizing ([#51](https://github.com/blazux/qwen3.8-Flash-DGX/issues/51)). |
+| 2026-10-08 | **Official vLLM v0.31 base:** [PR #49](https://github.com/blazux/qwen3.8-Flash-DGX/pull/49), contributed by **[@mercant1982](https://github.com/mercant1982)**; existing prepared checkpoints are reusable. [Upgrade and validation](#update-2026-10-08--vllm-v031-is-the-current-base). |
+
+For source-only fixes on an existing v0.31 installation, **rebuild the image**;
+`./flash setup` skips an already-built image with the current base label. See the
+[rebuild instructions](#parser-and-responses-output-fixes-issue-31).
 
 ## Quoted tool markers
 
@@ -119,6 +135,7 @@ patch --batch --forward --fuzz=0 -p1 < /path/to/qwen3.8-Flash-DGX/src/patches/qw
 patch --batch --forward --fuzz=0 -p1 < /path/to/qwen3.8-Flash-DGX/src/patches/qwen-tool-marker-guard.patch
 patch --batch --forward --fuzz=0 -p1 < /path/to/qwen3.8-Flash-DGX/src/patches/qwen-tool-marker-guard-tests.patch
 patch --batch --forward --fuzz=0 -p1 < /path/to/qwen3.8-Flash-DGX/src/patches/qwen-safe-output.patch
+patch --batch --forward --fuzz=0 -p1 < /path/to/qwen3.8-Flash-DGX/src/patches/qwen-tool-argument-schema.patch
 .venv/bin/python -m pytest tests/parser/engine -q
 ```
 
@@ -140,22 +157,70 @@ ported to vLLM v0.31 as patch 19:
 - A token-limited Responses generation ends with `response.incomplete`, including
   when the only generated content is hidden reasoning.
 
-Chat Completions keeps incremental tool-argument streaming. Responses buffers
+Chat Completions keeps incremental streaming for normal tool arguments. Responses buffers
 converted XML arguments until the call closes so truncated calls do not emit
-unfinished JSON. These fixes change parsing and error reporting; they do not
-prevent the model from emitting EOS early.
+unfinished JSON. Chat Completions also keeps its original tool-name contract:
+unoffered names are returned unchanged for the client to reject or recover from,
+while known `functions.` / `tools.` aliases resolve to an offered name. Clients
+must validate tool names before execution. Responses enforces the offered-name
+list and reports invalid calls as failures. This API distinction avoids turning
+a rejected Chat tool call into an empty successful turn (issue #56).
+These fixes change parsing and error reporting; they do not prevent the model
+from emitting EOS early.
 
-Validated on GX10: **67/67 targeted methods and 21/21 literal-byte fixtures**,
+Initial patch-19 validation on GX10: **67/67 targeted methods and 21/21 literal-byte fixtures**,
 no additional failures in 4,782 parser-engine cases, and real-inference checks of
 terminal events and tool round trips. The 55-scenario tournament was used as a
 regression check; its score is not evidence of these bug fixes. See
 [scope and validation](docs/SAFE-OUTPUT.md) and the
 [reproduction suite](tests/issue31_safe_output/README.md).
+The subsequent Chat compatibility fix adds **10 CPU regression methods**;
+patch 20 has **4 CPU configuration checks**. These and the original 67 + 21
+checks pass, with no new parser-engine failures.
 
 To update an existing installation, rebuild with
 `docker build -t qwen38-flash-dgx:v0.31 .`, then recreate the container with your
 usual profile and overrides. `./flash setup` reuses an existing v0.31 image and
 does not rebuild it for source-only fixes.
+
+### Schema-validated tool arguments (issue #31)
+
+Patch 21 fixes Qwen tool calls that accidentally wrap their parameters in a single
+`arguments` property. For a tool requiring `cmd`, for example,
+`{"arguments":"{\"cmd\":\"printf fixture\"}"}` becomes
+`{"cmd":"printf fixture"}` only when the offered schema validates that repair.
+Already valid payloads, including tools with a legitimate `arguments` parameter,
+remain unchanged. Missing or ambiguous schemas do not trigger inferred repair.
+
+The correction applies to Chat Completions and Responses. Responses reports
+schema-invalid calls as failures before exposing an executable function-call item.
+Chat retains its existing client recovery for invalid arguments and unknown names;
+normal arguments stream incrementally, while a possible wrapper waits for closure.
+
+**Thank you [@Chaos2522](https://github.com/Chaos2522) for the fix and regression
+fixtures**, shared in [issue #31](https://github.com/blazux/qwen3.8-Flash-DGX/issues/31#issuecomment-6291191080).
+This is a targeted v0.31 port. CPU checks pass for **11/11 producer integration
+tests, 10/10 Chat compatibility tests, 67/67 previous regression methods and
+21/21 byte-fidelity cases**. The author's schema suite is **22/23**, with an
+existing dotted-namespace limitation; the parser-engine suite remains
+**4,781/4,782**, with its existing literal-marker test failure. No new failures
+were introduced in these checks. These tests use synthetic engine frames;
+no model-inference, speed or EOS improvement is claimed for patch 21.
+See the [reproduction suite](tests/issue31_schema_arguments/README.md) for details.
+Existing installations need the image rebuild described above.
+
+### Routed-expert output with MTP (issue #55)
+
+Patch 20 fixes v0.31's draft-config copy when MTP is combined with
+`--enable-return-routed-experts`: only the target keeps auxiliary-output capture;
+the MTP drafter receives a fresh disabled auxiliary-output configuration. This
+avoids the draft's `AuxOutput Connector only supports generate runners` error.
+The target's other routed-expert compatibility requirements still apply.
+**Thank you [@rp-tn](https://github.com/rp-tn) for the diagnosis and patch**, shared
+in [issue #55](https://github.com/blazux/qwen3.8-Flash-DGX/issues/55) and integrated here.
+The [CPU regression test](tests/test_mtp_aux_output_cpu.py) checks the config copy
+and vLLM's actual compatibility guard; it does not exercise GPU boot or delivery
+of routed-expert output.
 
 ## Update 2026-10-08 — vLLM v0.31 is the current base
 
@@ -213,11 +278,14 @@ one wins; anything below it stays an option.
 | fp8 KV cache (`KV_DTYPE=fp8_e4m3`) | option | ×1.9 KV pool, 1M context. −4% decode, −3 to −17% prefill, tournament 88.4% (3 runs, 500k context) vs 87.8% in bf16 (3 runs); prefix-cache blocks twice as coarse |
 | Exact `torch.topk` (`EXACT_TOPK=1`) | fallback | deterministic like the kernel, −20–40% long prefill |
 | Persistent compile cache (`COMPILE_CACHE`) | option | −37 s of startup per boot after the first (init engine −26 s); startup only, outputs and tournament unaffected |
+| `concurrent` profile (`SEQS=16`, BF16 GDN state) | option | +21–94% aggregate throughput at 8–32 clients with the tested FP8 KV settings; second 55-scenario tournament pass 88.8% vs 88.9%, with one request timeout; [measurements below](#measured-concurrent-profile-pr-54) |
 | `--long-prefill-token-threshold` (via `EXTRA`) | option | keeps decoding clients responsive under concurrent prefills, at a TTFT cost |
 
 If your priority is raw throughput rather than the agent's reliability, the fast profile is
 `MODE=hybrid MTP=3` (41 tok/s in the tournament against 38.5 for the default), and
 `MODE=hybrid-mtp` on top if you need the KV pool more than the last few percent of quality.
+For parallel workloads, the `concurrent` profile raises the running-request cap to 16
+and uses BF16 recurrent state; see the [GX10 measurements](#measured-concurrent-profile-pr-54).
 
 ## The `flash` command
 
@@ -227,7 +295,7 @@ variables, checks what is already done, and tells you what is missing.
 | command | what it does |
 |---|---|
 | `./flash doctor [profile]` | checks arm64/GB10, the 128 GB pool and how much of it is free right now (vLLM needs `GPU_MEM` × total *free* to boot), docker + nvidia runtime, other running containers, the port, the image and its base label, the checkpoint, the prepared layouts, disk space for what is still to download, and the profile itself (YaRN vs context, context vs KV dtype) |
-| `./flash setup [profile]` | build the image (`Dockerfile`; an older build under the same name is rebuilt), download the weights, prepare the hybrid layout and the MTP graft — each step skipped when already done, so re-running it is free |
+| `./flash setup [profile]` | build the image if missing or using an older base, download the weights, prepare the hybrid layout and the MTP graft; completed steps are skipped. Source-only updates on the same base require an explicit `docker build`. |
 | `./flash serve [profile] [KEY=VALUE…]` | loads the profile, applies your overrides, refuses early if something is missing, then `exec`s `scripts/serve.sh` |
 | `./flash wait` | polls the container and the API, shows the loading stage, prints the KV pool when up |
 | `./flash test` | `scripts/smoke-test.sh` against the running server |
@@ -240,6 +308,7 @@ Profiles (`profiles/*.env`, each a handful of `serve.sh` variables; copy one to 
 |---|---|---|
 | `default` | hybrid, YaRN 500k, deterministic top-k, reduced draft vocabulary, prefix caching, MTP=2 | the recommended one: best tournament score (45/51) |
 | `speed` | default + `MTP=3` | +7% decode for about one tournament point |
+| `concurrent` | default + `SEQS=16`, `MAMBA_SSM_DTYPE=bfloat16`; uses the default CPUSET `5-9,15-19` | higher aggregate throughput with parallel clients; [measured with FP8 KV and an 8 GiB pool](#measured-concurrent-profile-pr-54) |
 | `context` | `MODE=hybrid-mtp` (NVFP4 MTP draft experts) | +22% KV pool for concurrency or long contexts, decode unchanged |
 | `context-1m` | hybrid + `KV_DTYPE=fp8_e4m3`, 1M context | when you need 1M tokens in one request (small speed cost) |
 | `shared` | default + `--long-prefill-token-threshold 1024` | several clients at once: decoding stays responsive while others prefill, single-stream TTFT −17–36% |
@@ -671,8 +740,8 @@ mmap patch should apply; we have not booted one ourselves.
 | `CTX` | `262144` | Max context. Native is 262144; with `YARN=1` up to `500000` is validated. |
 | `YARN` | `0` | `1` = YaRN rope scaling (factor 4, Qwen's recipe) for `CTX` > 262144. |
 | `SEQS` | `8` | Max concurrent sequences. **Do not benchmark with 1–2**: excess requests queue silently and aggregate tok/s flatlines (see below). |
-| `CPUSET` | `5-9,15-19` | docker `--cpuset-cpus`: pin the container to specific cores. Default is the 10 Cortex-X5 performance cores on the GB10 — the SGLang recipe for the 27B sibling model pinned its process there and kept it in its measured configs. `CPUSET=` (empty) = all 20 cores. |
-| `MAMBA_SSM_DTYPE` | | `--mamba-ssm-cache-dtype` for the GDN (mamba-style) recurrent state pool. vLLM defaults to `float32`; `bfloat16` halves that pool — on the 27B sibling model 30.9 GB → 15.6 GB at pool 80 — which is what frees the headroom to raise `SEQS`. See [the cross-referenced findings](#tuning-findings-cross-referenced-from-the-27b-sibling-recipe). |
+| `CPUSET` | `5-9,15-19` | docker `--cpuset-cpus`: pin the container to the GB10's 10 Cortex-X5 performance cores. `CPUSET=` (empty) lets a newly created container use all 20 cores. The [measured concurrent profile](#measured-concurrent-profile-pr-54) uses this pinning; its independent speed contribution has not been established. |
+| `MAMBA_SSM_DTYPE` | | `--mamba-ssm-cache-dtype` for GDN recurrent state. Unset follows the checkpoint configuration: the tested NVIDIA checkpoint specifies `float32`. Explicit `bfloat16` halves bytes per recurrent-state element and changes its precision. Enabled by the `concurrent` profile; see [memory and quality measurements](#measured-concurrent-profile-pr-54). |
 | `GPU_MEM` | `0.80` | Fraction of the 128 GB pool for weights+KV. `0.85` buys ~2 GiB more KV, but after a day at `0.85` the box drifted into swap, and `0.875` got OOM-killed on a 300k-token prefill with MTP. The lower you set it, the more RAM the page cache has for the 48 GiB table — which is what your prefill speed depends on (below). Right after stopping another big container the first boot can fail with "13.5 GiB KV cache is needed, larger than available" — memory not yet released; the `unless-stopped` retry succeeds. |
 | `MTP` | `2` | Speculative tokens from the model's MTP head (`0` = off). `3` is +7% decode but cost a point at the tournament (44 vs 45/51), so it stays an option. |
 | `KV_DTYPE` | `auto` | `auto` = bf16 (recommended). `fp8_e4m3` = ~1.9× KV pool, 1M context on one box, at −10% decode / −30% prefill and a measurable quality cost — see [fp8 KV cache](docs/HOW-IT-WORKS.md#fp8-kv-cache-on-the-qsa-path-opt-in) before using it. |
@@ -819,13 +888,76 @@ smaller chunks do have one unambiguous benefit: peak swap-out during the prefill
 - The structural way out is a second Spark: the four ConnectX-7 ports exist for that, and
   vLLM's prefill/decode disaggregation puts the prefills on the other box.
 
+### Measured concurrent profile (PR #54)
+
+[PR #54](https://github.com/blazux/qwen3.8-Flash-DGX/pull/54), contributed by
+[@aphex3k](https://github.com/aphex3k), adds `CPUSET`, `MAMBA_SSM_DTYPE`, the
+`concurrent` profile and the `bench/` performance, long-context and HumanEval tools.
+CPU pinning defaults to `5-9,15-19` for all profiles; `CPUSET=` disables it when
+creating the container. `concurrent` additionally selects `SEQS=16` and BF16 GDN
+state, while the `default` profile keeps `SEQS=8` and the checkpoint's state dtype.
+Run `./flash serve concurrent` to select it.
+
+Measured on a GX10 / GB10 on 2026-10-13–14, with vLLM v0.31, the NVIDIA hybrid
+checkpoint, MTP=2, YaRN 500k, prefix caching, `PREWARM=1`, **FP8 KV and a fixed
+8 GiB KV pool**. The baseline used all 20 CPUs, `SEQS=8` and FP32 recurrent state;
+the concurrent configuration used `CPUSET=5-9,15-19`, `SEQS=16` and BF16 state.
+These three changes were measured together. Settings matching this comparison:
+
+```bash
+./flash serve concurrent KV_DTYPE=fp8_e4m3 KV_CACHE_MEM=8589934592 PREWARM=1
+```
+
+| Simultaneous requests | Baseline tok/s | Concurrent tok/s | Change |
+|---|---:|---:|---:|
+| 1 | 46.3 | 47.2 | +2.1% |
+| 8 | 185.5 | **225.3** | **+21.5%** |
+| 16 | 186.8 | **362.1** | **+93.8%** |
+| 32 | 180.7 | **325.5** | **+80.2%** |
+
+Throughput is total completion tokens divided by client wall time, including
+request overhead. Single-request values are medians of six samples; parallel
+values are medians of two sweeps. The speed probes used short prompts, output caps
+of 400 tokens for single requests and 256 for parallel requests, and
+`chat_template_kwargs={"enable_thinking": false}`. Ollama and LiteLLM remained
+resident; baseline gateway traffic was not blocked. The small single-request
+difference is not a convincing speedup. At 16 clients, median time to first token
+fell from **5.90 s to 0.52 s**, with less queueing at the higher sequence cap.
+The CPUSET-only contribution remains inconclusive.
+
+**Prefill:** no clear gain. Time to first token for fresh ~8.5k / 34k / 101k-token
+prompts was 3.04 / 11.09 / 33.13 s in the baseline and 3.37 / 11.01 / 32.99 s with
+the concurrent configuration; all had `cached_tokens=0`. A 479,980-token retrieval
+probe succeeded in both configurations in **175.4 s**. The fixed 8 GiB cache
+accommodated **573,208 tokens vs 542,857 (+5.6%)** with BF16 recurrent state; this
+is a capacity gain, not a doubling of the whole KV pool.
+
+**Agentic quality:** two passes of the same 55-scenario tournament per configuration,
+temperature 0.2, four parallel scenarios and a 32,000-token response cap:
+
+| Tournament pass | Baseline | Concurrent |
+|---|---:|---:|
+| First | 89.0% | 85.4% |
+| Second | 88.9% | 88.8% |
+| Two-pass mean | 88.95% | 87.1% |
+
+The second baseline pass had six token-limit finishes; concurrent had five and
+one request timeout after 1,800 s (`g21_code_regex`, scored zero and included above).
+The two extra first-pass failures, `g9_code_topo` and `g36_code_justify`, both passed
+in the second concurrent run. No server crash was observed. Two unseeded passes
+do not establish equal quality or rule out a regression; the results support
+using this profile for aggregate throughput, with the precision change and
+request timeout included in its measured tradeoffs. Other KV dtypes and pool
+sizes were not covered by this comparison.
+
 ### Tuning findings cross-referenced from the 27B sibling recipe
 
 [aphex3k/Qwen3.8-27B-on-DGX-Spark](https://github.com/aphex3k/Qwen3.8-27B-on-DGX-Spark)
 serves the same Qwen3.8 hybrid architecture (GDN + PLE) on this same box, but through
 SGLang instead of vLLM. Its [measured results](https://github.com/aphex3k/Qwen3.8-27B-on-DGX-Spark/blob/main/results/RESULTS.md)
-are the best GB10 data we have on the architecture's concurrency behaviour, so this repo
-ports the findings that have a vLLM equivalent and leaves the rest documented as SGLang-only.
+motivated the tuning knobs ported here. The section above reports measurements on
+this model with vLLM; the findings below distinguish the shared ideas from
+SGLang-specific settings.
 
 **Ported (this repo):**
 
@@ -838,13 +970,14 @@ ports the findings that have a vLLM equivalent and leaves the rest documented as
 - **`MAMBA_SSM_DTYPE=bfloat16`** — the sibling's `--mamba-ssm-dtype bfloat16` halves the
   GDN state pool (30.9 GB → 15.6 GB at pool 80; float32 is the engine default). The vLLM
   equivalent, `--mamba-ssm-cache-dtype`, is exposed as `MAMBA_SSM_DTYPE` and set by the
-  `concurrent` profile. The Flash model's pool is much smaller than the 27B's, but the
-  same principle applies: halving the pool is free KV/page-cache headroom.
+  `concurrent` profile. The Flash model's pool is much smaller than the 27B's;
+  BF16 reduces recurrent-state memory at a different precision. The resulting
+  capacity and quality measurements for this model are reported above.
 - **`CPUSET=5-9,15-19`** — the sibling pinned SGLang to the 10 Cortex-X5 performance
   cores and kept it in every measured config. Exposed as `CPUSET` → docker
   `--cpuset-cpus` and pinned by default for the same reason; `CPUSET=` (empty) runs
-  the container on all 20 cores. We did not measure a delta on this model yet, so
-  treat the pin as an unverified port until A/B'd.
+  the container on all 20 cores. The full concurrent configuration was measured
+  on this model; the CPU pinning's independent contribution remains inconclusive.
 
 **SGLang-specific (not ported, no vLLM equivalent in v0.30):**
 
@@ -866,7 +999,7 @@ ports the findings that have a vLLM equivalent and leaves the rest documented as
 ## Benchmarking
 
 `bench/` is a self-contained suite that measures this recipe the same way the
-[Qwen3.8-27B-on-DGX-Spark](https://github.com/aphex3k/Qwen3.8-27B-on-DGX-Spark/results/RESULTS.md)
+[Qwen3.8-27B-on-DGX-Spark](https://github.com/aphex3k/Qwen3.8-27B-on-DGX-Spark/blob/main/results/RESULTS.md)
 recipe was measured on the same hardware, so the two can be compared head to head:
 
 ```bash
@@ -875,8 +1008,8 @@ export GB10_MODEL=qwen3.8-flash-next
 
 python3 bench/perf.py             # TTFT, single-stream decode, concurrency sweep, prefill curve
 python3 bench/longctx.py          # concurrent long-context; unique content per stream
-./scripts/run-humaneval.sh        # HumanEval pass@1, thinking off (~5 min)
-./scripts/run-humaneval.sh think  # thinking on (~20 min)
+./scripts/run-humaneval.sh        # HumanEval pass@1, low reasoning effort
+./scripts/run-humaneval.sh think  # xhigh reasoning effort
 ```
 
 Everything is env-driven (`GB10_BASE_URL`, `GB10_API_KEY`, `GB10_MODEL` — see
@@ -885,8 +1018,15 @@ HumanEval needs one-time setup on the box:
 `python3 -m pip install --user pandas pyarrow huggingface_hub`; the dataset lands in
 `data/humaneval`, results in `results/` (both gitignored), and candidates are executed
 against their real unit tests in a `--network none` `python:3.12-slim` container.
-Thinking is toggled through the checkpoint's `reasoning_effort` template argument
-(`low` off, `xhigh` on — override with `GB10_REASONING_OFF` / `GB10_REASONING_ON`).
+The scripts select `reasoning_effort=low` or `xhigh` through the checkpoint's
+template (`GB10_REASONING_OFF` / `GB10_REASONING_ON` override these values).
+On the tested NVIDIA checkpoint, **`low` still enables thinking**; disabling it
+requires `chat_template_kwargs={"enable_thinking": false}`, which the current
+benchmark client does not send. The [PR #54 measurements above](#measured-concurrent-profile-pr-54)
+used a separate client with thinking explicitly disabled and uncached prefill
+verified from response usage. The bundled streaming client also drops
+`finish_reason`, and `longctx.py` prints a placeholder zero for cached tokens;
+these outputs do not verify truncation or an uncached prefill.
 
 Measurement hygiene — each of these has produced a wrong number before:
 
@@ -973,9 +1113,9 @@ Details: [results-radixark-vllm.md](https://github.com/jschmied/qwen38-flash-nex
 
 ```
 flash                             one-command front-end: doctor / setup / serve <profile> / wait / test / status …
-profiles/*.env                    named recipes for it (default, speed, context, context-1m, shared, published, native)
+profiles/*.env                    named recipes (default, speed, concurrent, context, context-1m, shared, published, native)
 Dockerfile                        official vLLM v0.31.0 image + the patches below (qwen38-flash-dgx:v0.31).
-                                     Gaps in the numbering are upstream now: 3, 9, 11 (docs/HISTORY.md)
+                                     Native upstream now: 3, 7, 9, 11, 16 (docs/HISTORY.md, docs/VLLM-031.md)
 src/vllm_ple_mmap.py              1. mmap PLE table (opaque op, breaks the CUDA-graph capture)  VLLM_PLE_MMAP=1
 src/patch_mamba_block_size.py     4. prefix-caching block_size fix
 src/patch_qsa_exact_topk.py       5. exact, deterministic QSA top-k                  VLLM_QSA_EXACT_TOPK=1
@@ -986,14 +1126,17 @@ src/patch_mtp_draft_vocab.py     10. reduced draft vocabulary for the MTP drafte
 src/draft_vocab_65536.npy            the default 65,536-id set (tools/build_draft_vocab.py rebuilds it)
 src/vllm_fp8_hybrid_modelopt.py   6. NVFP4 experts + fp8 side layers dispatch        VLLM_FP8_HYBRID=1
                                      (patches the NVFP4 and the mixed-precision ModelOpt config classes)
-src/patch_qsa_fp8_kv.py           7. fp8_e4m3 KV cache on the QSA path (by @Nanetnounou) --kv-cache-dtype fp8_e4m3
+src/patch_qsa_fp8_kv.py           7. retired local FP8 KV patch; v0.31 uses native upstream support
 src/patch_moe_load_clone.py      14. clone mmap-backed expert weights before the H2D copy          VLLM_LOAD_CLONE=0 disables
                                      (main weight load 541 -> 150 s on a Spark; docs/HOW-IT-WORKS.md)
-src/patches/qwen-tool-*.patch    12, 13. Qwen tool-marker fixes in the parser engine (+ their test modules)
+src/patches/qwen-tool-preamble*.patch / qwen-tool-marker-guard*.patch
+                                12, 13. Qwen tool-marker fixes in the parser engine (+ their test modules)
 src/patches/qwen-safe-output.patch 19. Qwen token identity, empty STOP failures and Responses terminal events
+src/patches/qwen-mtp-aux-output.patch 20. keep target auxiliary outputs out of the MTP draft config
+src/patches/qwen-tool-argument-schema.patch 21. schema-validated repair of accidental arguments wrappers
 src/patch_load_pread.py          15. pread checkpoint tensors <= 64 MiB instead of mmap views     VLLM_LOAD_PREAD=0 disables
                                      (never the PLE table; needs 14)
-src/patch_moe_name_index.py      16. indexed FusedMoE expert-name matching (~30 s of Python)        VLLM_MOE_NAME_INDEX=0 disables
+src/patch_moe_name_index.py      16. retired local expert-name index; v0.31 uses native upstream support
 src/patch_embed_chunked_copy.py  17. embed_tokens / lm_head copied to the GPU in 64 MiB pieces     VLLM_LOAD_EMBED_CHUNK=0 disables
                                      15-17 together: weight load 150 + 32 s -> 35 + 12 s (docs/HOW-IT-WORKS.md)
 src/patch_mtp_name_prefilter.py  18. MTP drafter skips non-MTP tensors before reading (12 -> 1.2 s) VLLM_MTP_NAME_PREFILTER=0 disables
@@ -1003,10 +1146,17 @@ src/test_moe_name_index_cpu.py    CPU unit test: patch 16 visits exactly the ent
 src/test_load_patches_cpu.py      CPU check of patches 15 and 17 against real checkpoint files
 src/test_mtp_prefilter_cpu.py     CPU check of patch 18: the drafter's exact tensor set, on a real snapshot
 tests/test_fp8_kv_read.py         GPU check of patch 7: the fp8 read path matches bf16 bit for bit
+tests/issue31_safe_output/        patch-19 regression fixtures, Chat compatibility checks and client reproduction
+tests/issue31_schema_arguments/   patch-21 schema and producer regressions, provenance and installed-source hashes
+tests/test_mtp_aux_output_cpu.py  patch-20 draft-config isolation and auxiliary-output compatibility checks
+tests/test_prepare_hybrid.py     synthetic checkpoint/index preparation regressions (issue #50)
+tests/test_memory_profile_logging.py CPU checks for the optional startup-memory diagnostic hook
 tools/fp8_convert.py              side-layer bf16 -> blockwise fp8 (by @Saren-Arterius)
 tools/bench_moe_load.py           per-expert H2D copy micro-benchmark behind patch 14 (needs a free GPU)
 tools/profile_boot.sh             py-spy every process of a boot in 10 s slices (needs SYS_PTRACE, see header)
 tools/pyspy_slices.py             summarize those slices by process / thread / frame
+tools/Dockerfile.memory-diagnostics optional logging-only image for automatic KV sizing (issue #51)
+tools/patch_memory_profile_logging.py startup memory snapshots without allocation changes
 scripts/download-weights.sh       MODEL (default nvidia/Qwen3.8-Flash-Next-NVFP4), EXCLUDE, MAX_WORKERS, XET
 scripts/prepare-hybrid.sh         one-time: build the -fp8hybrid snapshot
 scripts/prepare-mtp-graft.sh      one-time: graft the NVFP4 MTP draft experts onto it (MODE=hybrid-mtp, RadixArk only)
@@ -1017,6 +1167,8 @@ scripts/greedy-probe.sh           greedy probe set; diff two arms to gate a draf
 scripts/run-humaneval.sh          HumanEval end-to-end: generate -> sandboxed execution -> report
 bench/                            perf.py (TTFT/decode/concurrency/prefill), longctx.py, humaneval/ — the benchmark suite
 docs/HOW-IT-WORKS.md              how each patch works, with the measurements
+docs/VLLM-031.md                  v0.31 migration, serving validation and automatic KV sizing diagnostics
+docs/SAFE-OUTPUT.md               parser/Responses fixes, Chat compatibility and validation scope
 docs/HISTORY.md                   the earlier updates and the preview / v0.29 bases
 ```
 
@@ -1054,7 +1206,11 @@ docker run --rm -v "$PWD/src:/t" -w /t --entrypoint python3 qwen38-flash-dgx:v0.
 - `COMPILE_CACHE`, the persistent compile cache: **[@AronRubin](https://github.com/AronRubin)** (PR #21).
 - The pointer to NVIDIA's own NVFP4 checkpoint: **[@PathosEthosLogos](https://github.com/PathosEthosLogos)** (issue #17).
 - `tools/vllm_watch.py`, the live session viewer: **[@0x3dlux](https://github.com/0x3dlux)** (issue #12).
-- Qwen token-identity and Responses output-integrity fixes (patch 19), with the source bundle and regression fixtures: **[@Chaos2522](https://github.com/Chaos2522)** ([issue #31](https://github.com/blazux/qwen3.8-Flash-DGX/issues/31#issuecomment-6191209070)); adapted here for vLLM v0.31.
+- Qwen token-identity and Responses output-integrity fixes (patch 19), and schema-validated tool-argument repair (patch 21), with source bundles and regression fixtures: **[@Chaos2522](https://github.com/Chaos2522)** ([original fixes](https://github.com/blazux/qwen3.8-Flash-DGX/issues/31#issuecomment-6191209070), [schema repair](https://github.com/blazux/qwen3.8-Flash-DGX/issues/31#issuecomment-6291191080)); adapted here for vLLM v0.31. Thank you for the detailed reproductions and follow-up work.
+- MTP/routed-expert draft-config diagnosis and patch (patch 20): **[@rp-tn](https://github.com/rp-tn)** ([issue #55](https://github.com/blazux/qwen3.8-Flash-DGX/issues/55)) — thank you for sharing the fix.
+- Chat tool-name compatibility regression report: **[@FinSnow](https://github.com/FinSnow)** ([issue #56](https://github.com/blazux/qwen3.8-Flash-DGX/issues/56)).
+- CPU pinning, BF16 recurrent-state control, the `concurrent` profile and benchmark suite: **[@aphex3k](https://github.com/aphex3k)** ([PR #54](https://github.com/blazux/qwen3.8-Flash-DGX/pull/54)).
+- The vLLM v0.31 port and contributed GB10 measurements: **[@mercant1982](https://github.com/mercant1982)** ([PR #49](https://github.com/blazux/qwen3.8-Flash-DGX/pull/49)).
 - The nudge to port the recipe to the vLLM releases (v0.29, then v0.30): **[@ChengYen-Tang](https://github.com/ChengYen-Tang)** (issue #14).
 
 - The two ideas behind the reduced draft vocabulary and the `MADV_RANDOM` table advice come

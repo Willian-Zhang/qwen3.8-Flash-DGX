@@ -1,0 +1,20 @@
+{
+  "author": "Chaos2522",
+  "comment": "https://github.com/blazux/qwen3.8-Flash-DGX/issues/31#issuecomment-6291191080",
+  "archive_url": "https://github.com/user-attachments/files/33718792/qwen-fp4-schema2-public-review-20261020.zip",
+  "archive_sha256": "3aa37712f38f90ffb668799330855cd32a1a3589a3dab95923209a724e170409",
+  "author_base_image": "eugr/spark-vllm-b12x@sha256:03a956544e9f9b4b7ba91690469fbe7848bdbef29a7d2e0f5788368467bb3595",
+  "author_vllm_sha": "8244d1c44348ae8a5bbfc9f1b607021652283ed4",
+  "helper_copied_unchanged": {
+    "path": "vllm/parser/engine/argument_validation.py",
+    "sha256": "b19f87e30239a5912d18053ba1c3428218d8e3849daa165182baf09bf1aafbcb"
+  },
+  "adaptations": [
+    "Port schema normalization to the recipe vLLM v0.31.0 parser and Responses producers; do not copy the complete ten-file source bundle.",
+    "Retain issue #56 Chat unknown-name passthrough, invalid-argument client recovery, and incremental normal-argument streaming.",
+    "Propagate tool schemas and invalid-argument status through the reasoning/tool adapters; distinguish invalid arguments from unknown-name errors.",
+    "Cache tool-schema lookup per offered catalog; avoid cross-request schema reuse.",
+    "Use v0.31 parser/producer fixtures; the author schema test assertions are unchanged, with the unsupported full-parse prompt_token_ids keyword removed.",
+    "The dotted namespace test remains a visible known failure; canonical namespace__function is independently tested."
+  ]
+}
