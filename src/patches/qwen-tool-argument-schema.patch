@@ -1,6 +1,6 @@
 --- a/vllm/parser/engine/parser_engine.py
 +++ b/vllm/parser/engine/parser_engine.py
-@@ -997,6 +997,8 @@
+@@ -1005,6 +1005,8 @@
          if name is not None:
              slot.name = name
          remaining = self._flush_arg_converter(idx)
@@ -9,7 +9,7 @@
  
          if not slot.name_sent:
              if name is not None:
-@@ -1063,6 +1065,18 @@
+@@ -1071,6 +1073,18 @@
  
      # ── Arg conversion helpers ─────────────────────────────────────────
  
@@ -28,7 +28,7 @@
      def _compute_arg_delta(self, idx: int, raw_delta: str) -> str | None:
          converter = self._arg_converter
          if converter is None:
-@@ -1088,6 +1102,8 @@
+@@ -1096,6 +1110,8 @@
          if slot.name:
              current_json = self._fix_arg_types(current_json, slot.name)
  
@@ -37,7 +37,7 @@
          prev = slot.streamed_json
          safe_json = self._safe_arg_prefix(current_json, slot.string_keys)
  
-@@ -1120,6 +1136,9 @@
+@@ -1128,6 +1144,9 @@
  
          if final_json:
              final_json = self._fix_arg_types(final_json, slot.name)
@@ -47,7 +47,7 @@
  
          prev = slot.streamed_json
          if final_json and len(final_json) > len(prev):
-@@ -1153,6 +1172,8 @@
+@@ -1161,6 +1180,8 @@
  
          tool_calls: list[ToolCall] = []
          for idx, slot in enumerate(self._tool_slots):
@@ -56,7 +56,7 @@
              if not slot.name and not slot.args:
                  continue
  
-@@ -1184,6 +1205,9 @@
+@@ -1192,6 +1213,9 @@
                  slot.name = name
                  self._ensure_tool_id(slot, name)
                  args_json = self._fix_arg_types(args_json, name)
@@ -209,7 +209,7 @@
      def skip_reasoning_parsing(self) -> bool:
 --- a/vllm/parser/abstract_parser.py
 +++ b/vllm/parser/abstract_parser.py
-@@ -331,7 +331,8 @@
+@@ -355,7 +355,8 @@
      @property
      def has_rejected_tool_calls(self) -> bool:
          """Expose tool rejection through the composed serving-layer parser."""
@@ -219,7 +219,7 @@
  
      def extract_reasoning(
          self,
-@@ -341,6 +342,11 @@
+@@ -365,6 +366,11 @@
          if self._reasoning_parser is None:
              return None, model_output
          return self._reasoning_parser.extract_reasoning(model_output, request)
@@ -231,7 +231,7 @@
  
      def _get_function_name(
          self, request: ChatCompletionRequest | ResponsesRequest
-@@ -881,6 +887,9 @@
+@@ -931,6 +937,9 @@
      ) -> DeltaMessage | None:
          self._initialize_history_tool_call_cnt(request)
          state = self._stream_state
@@ -243,7 +243,7 @@
              state.prompt_reasoning_checked = True
 --- a/vllm/entrypoints/openai/responses/serving.py
 +++ b/vllm/entrypoints/openai/responses/serving.py
-@@ -1029,6 +1029,8 @@
+@@ -1043,6 +1043,8 @@
                  enable_auto_tools=self.enable_auto_tools,
                  model_output_token_ids=final_output.token_ids,
              )
@@ -252,7 +252,7 @@
              if getattr(parser, "has_rejected_tool_calls", False):
                  raise GenerationError("Model generated a tool call absent from offered tools")
              if (
-@@ -1272,6 +1274,8 @@
+@@ -1286,6 +1288,8 @@
              else:
                  delta_message = DeltaMessage(content=output.text)
  

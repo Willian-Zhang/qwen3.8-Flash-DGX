@@ -1,6 +1,6 @@
 --- a/vllm/entrypoints/openai/responses/protocol.py
 +++ b/vllm/entrypoints/openai/responses/protocol.py
-@@ -38,6 +38,10 @@
+@@ -40,6 +40,10 @@
      ResponseCompletedEvent as OpenAIResponseCompletedEvent,
  )
  from openai.types.responses import ResponseCreatedEvent as OpenAIResponseCreatedEvent
@@ -11,7 +11,7 @@
  from openai.types.responses import (
      ResponseInProgressEvent as OpenAIResponseInProgressEvent,
  )
-@@ -696,7 +700,7 @@
+@@ -789,7 +793,7 @@
  class ResponsesResponse(OpenAIBaseModel):
      id: str = Field(default_factory=lambda: f"resp_{random_uuid()}")
      created_at: int = Field(default_factory=lambda: int(time.time()))
@@ -20,7 +20,7 @@
      incomplete_details: IncompleteDetails | None = None
      instructions: str | None = None
      metadata: Metadata | None = None
-@@ -895,6 +899,14 @@
+@@ -944,6 +948,14 @@
      response: ResponsesResponse  # type: ignore[override]
  
  
@@ -35,7 +35,7 @@
  class ResponseCreatedEvent(OpenAIResponseCreatedEvent):
      response: ResponsesResponse  # type: ignore[override]
  
-@@ -904,7 +916,10 @@
+@@ -953,7 +965,10 @@
  
  
  StreamingResponsesResponse: TypeAlias = (
@@ -57,7 +57,7 @@
  
  from vllm import envs
  from vllm.config.utils import replace
-@@ -47,6 +48,9 @@
+@@ -44,6 +45,9 @@
      InputTokensDetails,
      OutputTokensDetails,
      ResponseCompletedEvent,
@@ -67,29 +67,29 @@
      ResponseCreatedEvent,
      ResponseInProgressEvent,
      ResponseInputOutputItem,
-@@ -812,12 +816,15 @@
- 
-             # TODO: Build final response items from the accumulated streaming
-             # parser results instead of reparsing the complete output.
--            output = self._make_response_output_items(
--                request,
--                final_output,
--                tokenizer,
--                parser=context.response_parser,
--            )
-+            try:
-+                output = self._make_response_output_items(
-+                    request,
-+                    final_output,
-+                    tokenizer,
-+                    parser=context.response_parser,
-+                )
-+            except GenerationError as e:
-+                return self.create_error_response(str(e), status_code=e.status_code)
+@@ -848,12 +852,15 @@
+             if streamed_items is not None:
+                 output = streamed_items
+             else:
+-                output = self._make_response_output_items(
+-                    request,
+-                    final_output,
+-                    tokenizer,
+-                    parser=context.response_parser,
+-                )
++                try:
++                    output = self._make_response_output_items(
++                        request,
++                        final_output,
++                        tokenizer,
++                        parser=context.response_parser,
++                    )
++                except GenerationError as e:
++                    return self.create_error_response(str(e), status_code=e.status_code)
  
              if request.enable_response_messages:
                  input_messages = context.input_messages
-@@ -1022,6 +1029,16 @@
+@@ -1036,6 +1043,16 @@
                  enable_auto_tools=self.enable_auto_tools,
                  model_output_token_ids=final_output.token_ids,
              )
@@ -106,7 +106,7 @@
              if not request.include_reasoning:
                  reasoning = None
                  logprobs = None
-@@ -1034,6 +1051,8 @@
+@@ -1048,6 +1065,8 @@
              )
  
          # Fallback when no parser is configured
@@ -115,7 +115,7 @@
          return [
              ResponseOutputMessage(
                  id=f"msg_{random_uuid()}",
-@@ -1110,7 +1129,9 @@
+@@ -1124,7 +1143,9 @@
              while current_index < len(event_deque):
                  event = event_deque[current_index]
                  yield event
@@ -126,7 +126,7 @@
                      return
                  current_index += 1
  
-@@ -1175,6 +1196,26 @@
+@@ -1189,6 +1210,26 @@
              status_code=HTTPStatus.NOT_FOUND,
              param="response_id",
          )
@@ -153,7 +153,7 @@
  
      async def _process_simple_streaming_events(
          self,
-@@ -1208,6 +1249,8 @@
+@@ -1222,6 +1263,8 @@
                  top_logprobs=request.top_logprobs,
              )
  
@@ -162,7 +162,7 @@
          async for ctx in result_generator:
              assert isinstance(ctx, SimpleContext)
              if ctx.last_output is None or not ctx.last_output.outputs:
-@@ -1229,6 +1272,19 @@
+@@ -1243,6 +1286,16 @@
              else:
                  delta_message = DeltaMessage(content=output.text)
  
@@ -172,17 +172,14 @@
 +                delta_message
 +                and ((delta_message.content or "").strip() or delta_message.tool_calls)
 +            )
-+            if (
-+                output.finish_reason == "stop"
-+                and not has_nonreasoning_output
-+            ):
++            if output.finish_reason == "stop" and not has_nonreasoning_output:
 +                raise GenerationError(
 +                    "Model stopped without delivering a visible answer or function call"
 +                )
              if not delta_message:
                  continue
- 
-@@ -1367,9 +1423,10 @@
+             delta_message = maybe_filter_parallel_tool_calls(delta_message, request)
+@@ -1393,9 +1446,10 @@
                  ):
                      yield event_data
              except GenerationError as e:
@@ -195,7 +192,7 @@
                  )
                  return
  
-@@ -1389,9 +1446,34 @@
+@@ -1415,9 +1469,34 @@
                  request_metadata,
                  created_time=created_time,
              )
@@ -234,7 +231,7 @@
                  )
 --- a/vllm/parser/abstract_parser.py
 +++ b/vllm/parser/abstract_parser.py
-@@ -323,6 +323,16 @@
+@@ -347,6 +347,16 @@
      values (no reasoning extraction, no tool calls).
      """
  
@@ -251,7 +248,7 @@
      def extract_reasoning(
          self,
          model_output: str,
-@@ -780,6 +790,56 @@
+@@ -830,6 +840,56 @@
          self._append_unstreamed_tool_args(delta_message)
          return delta_message
  
@@ -308,7 +305,7 @@
      def parse(
          self,
          model_output: str,
-@@ -787,6 +847,20 @@
+@@ -837,6 +897,20 @@
          enable_auto_tools: bool = False,
          model_output_token_ids: Sequence[int] = (),
      ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
@@ -370,7 +367,7 @@
      def skip_reasoning_parsing(self) -> bool:
 --- a/vllm/parser/engine/parser_engine.py
 +++ b/vllm/parser/engine/parser_engine.py
-@@ -52,6 +52,8 @@
+@@ -59,6 +59,8 @@
          "_args_parts",
          "_args_joined",
          "name_sent",
@@ -379,7 +376,7 @@
          "string_keys",
          "streamed_json",
      )
-@@ -62,6 +64,8 @@
+@@ -69,6 +71,8 @@
          self._args_parts: list[str] = []
          self._args_joined: str | None = ""
          self.name_sent: bool = False
@@ -388,7 +385,7 @@
          self.string_keys: set[str] | None = None
          self.streamed_json: str = ""
  
-@@ -202,8 +206,12 @@
+@@ -209,8 +213,12 @@
          """See :meth:`ReasoningParser.adjust_initial_state_from_prompt`."""
          return
  
@@ -403,7 +400,7 @@
          if events or self._deferred_content:
              return self._events_to_delta(events, finished=True)
          return None
-@@ -412,8 +420,44 @@
+@@ -419,8 +427,44 @@
              return True
          return find_tool_name(self._tools, name)
  
@@ -449,7 +446,7 @@
  
      # ── Private helpers ─────────────────────────────────────────────
  
-@@ -453,11 +497,14 @@
+@@ -460,11 +504,14 @@
          finished: bool,
      ) -> DeltaMessage | None:
          self._initialize_history_tool_call_cnt(request)
@@ -466,7 +463,7 @@
              self._prompt_streaming_prepared = True
          self._check_skip_tool_parsing(request)
          events = self._feed(delta_text, delta_token_ids)
-@@ -884,7 +931,8 @@
+@@ -892,7 +939,8 @@
          deltas: list[DeltaToolCall],
          name: str | None,
      ) -> None:
@@ -476,7 +473,7 @@
              return
          slot = self._tool_slots[idx]
          slot.name = name
-@@ -939,12 +987,19 @@
+@@ -947,12 +995,19 @@
          if idx >= len(self._tool_slots):
              return
  
@@ -499,7 +496,7 @@
                  slot.name = name
                  slot.name_sent = True
                  slot.string_keys = self._streamable_string_keys(
-@@ -963,6 +1018,8 @@
+@@ -971,6 +1026,8 @@
                      )
                  )
                  remaining = None
@@ -508,7 +505,7 @@
  
          if remaining and slot.name_sent:
              deltas.append(
-@@ -1099,7 +1156,10 @@
+@@ -1107,7 +1164,10 @@
              if not slot.name and not slot.args:
                  continue
  
@@ -520,7 +517,7 @@
              raw_body = slot.args
  
              if not name and raw_body.strip():
-@@ -1119,7 +1179,9 @@
+@@ -1127,7 +1187,9 @@
              else:
                  args_json = "{}"
  
@@ -531,7 +528,7 @@
                  self._ensure_tool_id(slot, name)
                  args_json = self._fix_arg_types(args_json, name)
                  tool_calls.append(
-@@ -1128,6 +1190,8 @@
+@@ -1136,6 +1198,8 @@
                          function=FunctionCall(name=name, arguments=args_json),
                      )
                  )

@@ -1,0 +1,36 @@
+{
+  "model_inference": false,
+  "source_overlay": false,
+  "installed_hashes_verified": 9,
+  "groups": {
+    "author_schema": {
+      "methods": 23,
+      "failures": [
+        "test_argument_schema.ArgumentSchema.test_namespace_uses_exact_offered_schema"
+      ],
+      "errors": [],
+      "skipped": 0,
+      "expected_preexisting_failures": [
+        "test_argument_schema.ArgumentSchema.test_namespace_uses_exact_offered_schema"
+      ],
+      "matches_expected": true
+    },
+    "v031_integration": {
+      "methods": 11,
+      "failures": [],
+      "errors": [],
+      "skipped": 0,
+      "expected_preexisting_failures": [],
+      "matches_expected": true
+    },
+    "chat_compatibility": {
+      "methods": 10,
+      "failures": [],
+      "errors": [],
+      "skipped": 0,
+      "expected_preexisting_failures": [],
+      "matches_expected": true
+    }
+  },
+  "no_unexpected_failures": true
+}

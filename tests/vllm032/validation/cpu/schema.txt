@@ -1,0 +1,119 @@
+W1021 21:40:42.196000 1 torch/utils/cpp_extension.py:178] No CUDA runtime is found, using CUDA_HOME='/usr/local/cuda'
+test_arguments_with_sibling_never_unwrapped (test_argument_schema.ArgumentSchema.test_arguments_with_sibling_never_unwrapped) ... ok
+test_double_encoded_inner_not_recursively_unrolled (test_argument_schema.ArgumentSchema.test_double_encoded_inner_not_recursively_unrolled) ... ok
+test_duplicate_json_keys_and_nonfinite_not_losslessly_repaired (test_argument_schema.ArgumentSchema.test_duplicate_json_keys_and_nonfinite_not_losslessly_repaired) ... ok
+test_escaped_newline_backslash_and_unicode_preserved (test_argument_schema.ArgumentSchema.test_escaped_newline_backslash_and_unicode_preserved) ... ok
+test_extra_properties_inner_rejected (test_argument_schema.ArgumentSchema.test_extra_properties_inner_rejected) ... ok
+test_implicit_thinking_call_uses_same_normalizer (test_argument_schema.ArgumentSchema.test_implicit_thinking_call_uses_same_normalizer) ... ok
+test_inner_type_mismatch_not_coerced (test_argument_schema.ArgumentSchema.test_inner_type_mismatch_not_coerced) ... ok
+test_invalid_supplied_schema_fails_safely (test_argument_schema.ArgumentSchema.test_invalid_supplied_schema_fails_safely) ... ok
+test_legitimate_arguments_property_is_not_unwrapped (test_argument_schema.ArgumentSchema.test_legitimate_arguments_property_is_not_unwrapped) ... ok
+test_missing_required_inner_rejected (test_argument_schema.ArgumentSchema.test_missing_required_inner_rejected) ... ok
+test_namespace_uses_exact_offered_schema (test_argument_schema.ArgumentSchema.test_namespace_uses_exact_offered_schema) ... Rejected tool call: parser=qwen3 index=0 name='functions_group.run' absent from offered tools
+FAIL
+test_non_json_and_scalar_wrappers_rejected (test_argument_schema.ArgumentSchema.test_non_json_and_scalar_wrappers_rejected) ... ok
+test_one_layer_object_wrapper (test_argument_schema.ArgumentSchema.test_one_layer_object_wrapper) ... ok
+test_original_valid_arguments_even_when_inner_would_match (test_argument_schema.ArgumentSchema.test_original_valid_arguments_even_when_inner_would_match) ... ok
+test_plain_direct_command_unchanged (test_argument_schema.ArgumentSchema.test_plain_direct_command_unchanged) ... ok
+test_real_shape_json_string_wrapper_normalized_all_paths (test_argument_schema.ArgumentSchema.test_real_shape_json_string_wrapper_normalized_all_paths) ... ok
+test_remote_ref_never_retrieved (test_argument_schema.ArgumentSchema.test_remote_ref_never_retrieved) ... ok
+test_repeated_full_reconstruction_is_idempotent (test_argument_schema.ArgumentSchema.test_repeated_full_reconstruction_is_idempotent) ... ok
+test_schema_local_ref_and_nested_types_checked (test_argument_schema.ArgumentSchema.test_schema_local_ref_and_nested_types_checked) ... ok
+test_unknown_name_not_authorized_by_wrapper (test_argument_schema.ArgumentSchema.test_unknown_name_not_authorized_by_wrapper) ... Rejected tool call: parser=qwen3 index=0 name='write_file' absent from offered tools
+Rejected tool call: parser=qwen3 index=0 name='write_file' absent from offered tools
+Rejected tool call: parser=qwen3 index=0 name='write_file' absent from offered tools
+Rejected tool call: parser=qwen3 index=0 name='write_file' absent from offered tools
+ok
+test_unknown_schema_dialect_fails_without_guessing (test_argument_schema.ArgumentSchema.test_unknown_schema_dialect_fails_without_guessing) ... ok
+test_unknown_schema_does_not_infer_unwrap (test_argument_schema.ArgumentSchema.test_unknown_schema_does_not_infer_unwrap) ... ok
+test_valid_original_keeps_exact_serialization (test_argument_schema.ArgumentSchema.test_valid_original_keeps_exact_serialization) ... ok
+
+======================================================================
+FAIL: test_namespace_uses_exact_offered_schema (test_argument_schema.ArgumentSchema.test_namespace_uses_exact_offered_schema)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tests/issue31_schema_arguments/test_argument_schema.py", line 54, in test_namespace_uses_exact_offered_schema
+    for args,p in self.paths(xml('{"cmd":"fixture"}',name),tools):self.assertEqual(args,[{'cmd':'fixture'}]);self.assertFalse(p.has_rejected_tool_calls)
+                                                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: Lists differ: [] != [{'cmd': 'fixture'}]
+
+Second list contains 1 additional elements.
+First extra element 0:
+{'cmd': 'fixture'}
+
+- []
++ [{'cmd': 'fixture'}]
+
+----------------------------------------------------------------------
+Ran 23 tests in 18.297s
+
+FAILED (failures=1)
+test_ambiguous_schema_keeps_legacy_shape (schema_integration_tests.Integration.test_ambiguous_schema_keeps_legacy_shape) ... ok
+test_chat_invalid_wrapper_retains_client_error_path (schema_integration_tests.Integration.test_chat_invalid_wrapper_retains_client_error_path) ... ok
+test_chat_wrapped_args_normalized_stream_and_full (schema_integration_tests.Integration.test_chat_wrapped_args_normalized_stream_and_full) ... ok
+test_implicit_bad_args_fail_without_executable_item (schema_integration_tests.Integration.test_implicit_bad_args_fail_without_executable_item) ... ok
+test_implicit_reasoning_calls_use_schema_repair (schema_integration_tests.Integration.test_implicit_reasoning_calls_use_schema_repair) ... ok
+test_length_without_closer_remains_incomplete (schema_integration_tests.Integration.test_length_without_closer_remains_incomplete) ... ok
+test_regular_chat_arguments_still_stream_before_close (schema_integration_tests.Integration.test_regular_chat_arguments_still_stream_before_close) ... ok
+test_responses_invalid_fails_before_tool_item (schema_integration_tests.Integration.test_responses_invalid_fails_before_tool_item) ... ok
+test_responses_stream_full_and_persisted_json_agree (schema_integration_tests.Integration.test_responses_stream_full_and_persisted_json_agree) ... ok
+test_schema_changes_between_requests_do_not_leak (schema_integration_tests.Integration.test_schema_changes_between_requests_do_not_leak) ... ok
+test_unknown_chat_name_not_authorized_by_wrapper (schema_integration_tests.Integration.test_unknown_chat_name_not_authorized_by_wrapper) ... ok
+
+----------------------------------------------------------------------
+Ran 11 tests in 6.896s
+
+OK
+test_closed_reasoning_example_stays_reasoning (chat_compat_tests.ChatCompatibility.test_closed_reasoning_example_stays_reasoning) ... ok
+test_concurrent_chat_streams_are_independent (chat_compat_tests.ChatCompatibility.test_concurrent_chat_streams_are_independent) ... ok
+test_full_chat_producer_matches_streaming_tool_name_contract (chat_compat_tests.ChatCompatibility.test_full_chat_producer_matches_streaming_tool_name_contract) ... ok
+test_implicit_reasoning_end_keeps_tool_transition (chat_compat_tests.ChatCompatibility.test_implicit_reasoning_end_keeps_tool_transition) ... ok
+test_offered_namespace_alias_still_resolves (chat_compat_tests.ChatCompatibility.test_offered_namespace_alias_still_resolves) ... ok
+test_rejected_tool_warning_includes_name_without_arguments (chat_compat_tests.ChatCompatibility.test_rejected_tool_warning_includes_name_without_arguments) ... ok
+test_responses_validation_stays_strict_and_per_request (chat_compat_tests.ChatCompatibility.test_responses_validation_stays_strict_and_per_request) ... Rejected tool call: parser=qwen3 index=0 name='unknown_tool' absent from offered tools
+Rejected tool call: parser=qwen3 index=0 name='unknown_tool' absent from offered tools
+ok
+test_sequential_chat_calls_have_contiguous_indices (chat_compat_tests.ChatCompatibility.test_sequential_chat_calls_have_contiguous_indices) ... ok
+test_unknown_call_reaches_chat_client_instead_of_empty_stop (chat_compat_tests.ChatCompatibility.test_unknown_call_reaches_chat_client_instead_of_empty_stop) ... ok
+test_unknown_name_is_never_remapped_to_an_offered_tool (chat_compat_tests.ChatCompatibility.test_unknown_name_is_never_remapped_to_an_offered_tool) ... ok
+
+----------------------------------------------------------------------
+Ran 10 tests in 8.793s
+
+OK
+{
+  "model_inference": false,
+  "source_overlay": false,
+  "installed_hashes_verified": 9,
+  "groups": {
+    "author_schema": {
+      "methods": 23,
+      "failures": [
+        "test_argument_schema.ArgumentSchema.test_namespace_uses_exact_offered_schema"
+      ],
+      "errors": [],
+      "skipped": 0,
+      "expected_preexisting_failures": [
+        "test_argument_schema.ArgumentSchema.test_namespace_uses_exact_offered_schema"
+      ],
+      "matches_expected": true
+    },
+    "v031_integration": {
+      "methods": 11,
+      "failures": [],
+      "errors": [],
+      "skipped": 0,
+      "expected_preexisting_failures": [],
+      "matches_expected": true
+    },
+    "chat_compatibility": {
+      "methods": 10,
+      "failures": [],
+      "errors": [],
+      "skipped": 0,
+      "expected_preexisting_failures": [],
+      "matches_expected": true
+    }
+  },
+  "no_unexpected_failures": true
+}

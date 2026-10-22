@@ -1,0 +1,4 @@
+## 4. Long-context prefill
+   prompt    9743 tok -> TTFT   3.11s   prefill ~   3133 tok/s
+   prompt   38743 tok -> TTFT  12.12s   prefill ~   3196 tok/s
+   prompt  120910 tok -> TTFT  38.44s   prefill ~   3145 tok/s

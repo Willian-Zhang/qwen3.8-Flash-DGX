@@ -1,0 +1,1 @@
+exact top-k: OK (sets match torch.topk over visible columns, deterministic)

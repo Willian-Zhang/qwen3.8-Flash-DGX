@@ -19,11 +19,13 @@ KNOWN_NAMESPACE_FAILURE = (
 def main():
     cli = argparse.ArgumentParser(description=__doc__)
     cli.add_argument("--report", type=Path, help="Optional writable JSON report path")
+    cli.add_argument("--manifest", type=Path, default=ROOT / "PORT-MANIFEST.json",
+                     help="Installed-source manifest for the tested vLLM release")
     args = cli.parse_args()
     # Only fixtures enter sys.path. vLLM must come from the installed image.
     sys.path[:0] = [str(ROOT), str(LEGACY), str(LEGACY / "tests")]
     package_root = Path(importlib.util.find_spec("vllm").origin).parent.parent
-    manifest = json.loads((ROOT / "PORT-MANIFEST.json").read_text())
+    manifest = json.loads(args.manifest.read_text())
     for entry in manifest["installed_files"]:
         path = package_root / entry["path"]
         actual = hashlib.sha256(path.read_bytes()).hexdigest()

@@ -1,0 +1,46 @@
+{
+  "model_inference": true,
+  "prompt_tokens_tokenize": 498994,
+  "runs": [
+    {
+      "repeat": 0,
+      "elapsed_s": 184.60121636799886,
+      "usage": {
+        "prompt_tokens": 498994,
+        "total_tokens": 499051,
+        "completion_tokens": 57,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "created_cache_tokens": 496048,
+          "multimodal_tokens": null
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 48
+        }
+      },
+      "content": "\n\n583917",
+      "finish_reason": "stop"
+    },
+    {
+      "repeat": 1,
+      "elapsed_s": 3.613305937004043,
+      "usage": {
+        "prompt_tokens": 498994,
+        "total_tokens": 499051,
+        "completion_tokens": 57,
+        "prompt_tokens_details": {
+          "cached_tokens": 496048,
+          "created_cache_tokens": 0,
+          "multimodal_tokens": null
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 48
+        }
+      },
+      "content": "\n\n583917",
+      "finish_reason": "stop"
+    }
+  ],
+  "deterministic": true,
+  "prefix_cache_hit": true
+}

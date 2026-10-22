@@ -713,14 +713,16 @@ def _install(cls: type) -> None:
         raise RuntimeError(f"PLE mmap: {mod.__name__} has no Qwen4ExpPLEDeviceEmbedding; layout not recognised")
 
     def __init__(self, config, embedding_dim, ple_dense_layer_id, max_total_tokens, *,
-                 data_parallel_rank, prefix, quant_config=None, params_dtype=None):
+                 data_parallel_rank, prefix, quant_config=None, params_dtype=None,
+                 use_sequence_parallel=False):
         real = {a: getattr(mod, a) for a in embed_attrs}
         for a in embed_attrs:
             setattr(mod, a, lambda n, d, **_kw: _MmapNgramEmbeddingDevice(n, d))
         try:
             orig_init(self, config, embedding_dim, ple_dense_layer_id, max_total_tokens,
                       data_parallel_rank=data_parallel_rank, prefix=prefix,
-                      quant_config=None, params_dtype=params_dtype)
+                      quant_config=None, params_dtype=params_dtype,
+                      use_sequence_parallel=use_sequence_parallel)
         finally:
             for a, real_cls in real.items():
                 setattr(mod, a, real_cls)
@@ -790,6 +792,10 @@ def _install(cls: type) -> None:
             capture.add_eager(lambda: _eager_lookup(op, ids_ref, out_ref, prefix))
         else:
             op(ngram_ids, output, prefix)
+        if self.use_sequence_parallel:
+            # Each mmap table contains the full vocabulary on every rank, so
+            # shard token rows without reducing replicated contributions.
+            return mod.sp_shard(output)
         return output
 
     _register_op()

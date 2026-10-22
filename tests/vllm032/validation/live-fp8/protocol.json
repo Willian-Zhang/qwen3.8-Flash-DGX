@@ -1,0 +1,12 @@
+{
+  "model": "qwen3.8-flash-next",
+  "model_inference": true,
+  "tools_executed": 0,
+  "checks": {
+    "chat_tool_arguments": true,
+    "chat_tool_round_trip": true,
+    "responses_full": true,
+    "responses_stream": true
+  },
+  "elapsed_s": 5.864142933001858
+}

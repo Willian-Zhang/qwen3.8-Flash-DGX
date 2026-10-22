@@ -1,0 +1,3 @@
+W1021 21:44:07.312000 1 torch/utils/cpp_extension.py:178] No CUDA runtime is found, using CUDA_HOME='/usr/local/cuda'
+Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+patch 18 OK: 3103 of 299845 tensors kept (the drafter's exact set), 296742 skipped before reading; 4.0 s for 11 files

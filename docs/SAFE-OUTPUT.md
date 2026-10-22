@@ -1,12 +1,14 @@
 # Qwen parser and Responses output integrity (patches 19 and 21)
 
 Patch 19 ports [Chaos2522's review2 source bundle](https://github.com/blazux/qwen3.8-Flash-DGX/issues/31#issuecomment-6191209070)
-from vLLM v0.30 to the recipe's v0.31.0 base. It applies after patches 12 and 13.
+from vLLM v0.30 to the then-current v0.31.0 base. It applies after patches 12 and 13.
 Credit for the original fixes and regression fixtures belongs to Chaos2522.
 Archive provenance and the eight patch-19 source-file hashes are in
 [`SOURCE.json`](../tests/issue31_safe_output/SOURCE.json) and
 [`PORT-MANIFEST.json`](../tests/issue31_safe_output/PORT-MANIFEST.json).
-The patch-21 follow-up and current installed hashes are described below.
+The patch-21 follow-up and historical v0.31 hashes are described below.
+For the current v0.32 rebase, installed-source manifest and validation, see
+[VLLM-032.md](VLLM-032.md).
 
 ## Behavior
 
@@ -113,7 +115,7 @@ improvement is claimed.
 
 See the [runner and known failures](../tests/issue31_schema_arguments/README.md),
 [provenance](../tests/issue31_schema_arguments/SOURCE.json),
-[current installed hashes](../tests/issue31_schema_arguments/PORT-MANIFEST.json)
+[v0.31 installed hashes](../tests/issue31_schema_arguments/PORT-MANIFEST.json)
 and [recorded validation](../tests/issue31_schema_arguments/VALIDATION.json).
 
 ## GX10 validation, 2026-10-15–16 (patch 19)

@@ -1,0 +1,14 @@
+{
+  "image_id": "sha256:e726e3294db084152855439bc3bed05ca38189a3bb7b0d5465936f21c5f407b8",
+  "context": "500000",
+  "max_num_seqs": "8",
+  "kv_dtype": "auto",
+  "kv_bytes_override": null,
+  "gpu_memory_utilization": "0.80",
+  "mamba_ssm_dtype_override": null,
+  "cpuset": "5-9,15-19",
+  "kv_gib": 16.43,
+  "kv_tokens": 607575,
+  "start_utc": "2026-10-21T22:02:58Z",
+  "ready_utc": "2026-10-21T22:06:28Z"
+}

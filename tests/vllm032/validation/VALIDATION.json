@@ -1,0 +1,254 @@
+{
+  "date": "2026-10-21",
+  "issue": 58,
+  "hardware": "NVIDIA GB10 (ASUS GX10), aarch64",
+  "driver": "580.173.02",
+  "candidate_image": "qwen38-flash-dgx:v0.32",
+  "candidate_image_id": "sha256:e726e3294db084152855439bc3bed05ca38189a3bb7b0d5465936f21c5f407b8",
+  "configuration": {
+    "checkpoint_revision": "fc694b54fb0174e0913e6adf86691ef85a4ead47-fp8hybrid",
+    "mode": "hybrid",
+    "context": 500000,
+    "yarn": true,
+    "mtp": 2,
+    "max_num_seqs": 16,
+    "gpu_memory_utilization": 0.8,
+    "kv_dtype": "fp8_e4m3",
+    "kv_bytes": 8589934592,
+    "mamba_ssm_dtype": "bfloat16",
+    "cudagraph": "PIECEWISE"
+  },
+  "cpu": {
+    "schema": {
+      "model_inference": false,
+      "source_overlay": false,
+      "installed_hashes_verified": 9,
+      "groups": {
+        "author_schema": {
+          "methods": 23,
+          "failures": [
+            "test_argument_schema.ArgumentSchema.test_namespace_uses_exact_offered_schema"
+          ],
+          "errors": [],
+          "skipped": 0,
+          "expected_preexisting_failures": [
+            "test_argument_schema.ArgumentSchema.test_namespace_uses_exact_offered_schema"
+          ],
+          "matches_expected": true
+        },
+        "v031_integration": {
+          "methods": 11,
+          "failures": [],
+          "errors": [],
+          "skipped": 0,
+          "expected_preexisting_failures": [],
+          "matches_expected": true
+        },
+        "chat_compatibility": {
+          "methods": 10,
+          "failures": [],
+          "errors": [],
+          "skipped": 0,
+          "expected_preexisting_failures": [],
+          "matches_expected": true
+        }
+      },
+      "no_unexpected_failures": true
+    },
+    "safe_output": {
+      "model_inference": false,
+      "source_overlay": false,
+      "groups": {
+        "parser": {
+          "methods": 16,
+          "passed": true,
+          "failures": 0,
+          "errors": 0
+        },
+        "responses_sse": {
+          "methods": 11,
+          "passed": true,
+          "failures": 0,
+          "errors": 0
+        },
+        "actual_parser_manager": {
+          "methods": 12,
+          "passed": true,
+          "failures": 0,
+          "errors": 0
+        },
+        "reasoning_eof": {
+          "methods": 15,
+          "passed": true,
+          "failures": 0,
+          "errors": 0
+        },
+        "empty_stop": {
+          "methods": 5,
+          "passed": true,
+          "failures": 0,
+          "errors": 0
+        },
+        "actual_length_terminal_producer": {
+          "methods": 8,
+          "passed": true,
+          "failures": 0,
+          "errors": 0
+        }
+      },
+      "total_methods": 67,
+      "fidelity": {
+        "literal_byte_fidelity_cases": 21,
+        "stream_final_mismatches": 0,
+        "chunk_mismatches": 0,
+        "ordinary_bpe_protocol_ids_absent": true,
+        "normal_final_answer_passed": true
+      },
+      "passed": true
+    },
+    "mtp_aux_methods": 4,
+    "hybrid_qsa_methods": 4,
+    "responses_v032_methods": 2,
+    "ple_constructor_methods": 1,
+    "ple_gather": "pass",
+    "exact_topk": "pass",
+    "mtp_prefilter": "3103 kept / 299845 total; exact names; filter cleared",
+    "parser_engine": {
+      "passed": 5913,
+      "failed": 1,
+      "baseline_passed": 5913,
+      "baseline_failed": 1,
+      "known_failure": "TestTruncatedToolOpenerStreamParity::test_content_around_unpromoted_tool_block_stays_ordered",
+      "baseline_description": "Official v0.32 plus existing patches 12/13 only; candidate adds the complete recipe."
+    },
+    "hybrid_dispatch_methods": 2
+  },
+  "gpu": {
+    "fp8_production_settings": {
+      "passed": true,
+      "startup_seconds": 216,
+      "kv_tokens": 573208,
+      "baseline_kv_tokens": 573208,
+      "model_loading_gib": 74.44,
+      "baseline_model_loading_gib": 74.91,
+      "smoke": "pass",
+      "protocol": "pass",
+      "long_context": {
+        "model_inference": true,
+        "prompt_tokens_tokenize": 498994,
+        "runs": [
+          {
+            "repeat": 0,
+            "elapsed_s": 184.60121636799886,
+            "usage": {
+              "prompt_tokens": 498994,
+              "total_tokens": 499051,
+              "completion_tokens": 57,
+              "prompt_tokens_details": {
+                "cached_tokens": 0,
+                "created_cache_tokens": 496048,
+                "multimodal_tokens": null
+              },
+              "completion_tokens_details": {
+                "reasoning_tokens": 48
+              }
+            },
+            "content": "\n\n583917",
+            "finish_reason": "stop"
+          },
+          {
+            "repeat": 1,
+            "elapsed_s": 3.613305937004043,
+            "usage": {
+              "prompt_tokens": 498994,
+              "total_tokens": 499051,
+              "completion_tokens": 57,
+              "prompt_tokens_details": {
+                "cached_tokens": 496048,
+                "created_cache_tokens": 0,
+                "multimodal_tokens": null
+              },
+              "completion_tokens_details": {
+                "reasoning_tokens": 48
+              }
+            },
+            "content": "\n\n583917",
+            "finish_reason": "stop"
+          }
+        ],
+        "deterministic": true,
+        "prefix_cache_hit": true
+      }
+    },
+    "default_profile": {
+      "passed": true,
+      "launch": "./flash serve default NAME=flashnext-v032-default",
+      "smoke": "pass",
+      "image_id": "sha256:e726e3294db084152855439bc3bed05ca38189a3bb7b0d5465936f21c5f407b8",
+      "context": "500000",
+      "max_num_seqs": "8",
+      "kv_dtype": "auto",
+      "kv_bytes_override": null,
+      "gpu_memory_utilization": "0.80",
+      "mamba_ssm_dtype_override": null,
+      "cpuset": "5-9,15-19",
+      "kv_gib": 16.43,
+      "kv_tokens": 607575,
+      "start_utc": "2026-10-21T22:02:58Z",
+      "ready_utc": "2026-10-21T22:06:28Z",
+      "startup_seconds": 210
+    },
+    "production_restoration": {
+      "restored": true,
+      "health_http_status": 200,
+      "image_id": "sha256:d8a21af8e0baa3ca3183546496355787da7b37fa181d273b0f8a25b8fff2a102",
+      "same_container": true,
+      "same_image": true,
+      "same_command": true,
+      "same_environment": true,
+      "completion_text": " Paris, a city renowned for its iconic",
+      "version": "v0.31"
+    }
+  },
+  "limitations": [
+    "One host; shared system with Ollama and LiteLLM still running; external traffic not isolated.",
+    "CPU QA overlapped part of the v0.31 reference measurements.",
+    "The second prefill pass in qwen-v031-perf-clean.txt reused prefixes; use qwen-v031-prefill-fresh.txt for prefill comparison.",
+    "No general model-quality or early-EOS improvement established.",
+    "The full agentic tournament was not rerun.",
+    "Long-context quality evidence is one synthetic middle-of-document retrieval and its greedy replay.",
+    "GPU validation is TP=1; sequence-parallel mmap plumbing is not a multi-GPU validation."
+  ],
+  "performance": {
+    "code_median_end_to_end_tokens_per_s": {
+      "v031": 48.8,
+      "v032": 47.7
+    },
+    "concurrent_4_aggregate_tokens_per_s": {
+      "v031": 104.3,
+      "v032": 108.1
+    },
+    "concurrent_8_aggregate_tokens_per_s": {
+      "v031": 168.5,
+      "v032": 161.0
+    },
+    "fresh_prefill_tokens_per_s": [
+      {
+        "input_tokens": 9743,
+        "v031": 3133,
+        "v032": 3159
+      },
+      {
+        "input_tokens": 38743,
+        "v031": 3196,
+        "v032": 3238
+      },
+      {
+        "input_tokens": 120910,
+        "v031": 3145,
+        "v032": 3179
+      }
+    ]
+  },
+  "status": "complete"
+}

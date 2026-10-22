@@ -1,0 +1,63 @@
+{
+  "model_inference": false,
+  "suites": {
+    "schema": {
+      "exit_code": 0
+    },
+    "safe-output": {
+      "exit_code": 0
+    },
+    "mtp-aux": {
+      "exit_code": 0
+    },
+    "hybrid-qsa": {
+      "exit_code": 0
+    },
+    "hybrid-dispatch": {
+      "exit_code": 0
+    },
+    "ple-constructor": {
+      "exit_code": 0
+    },
+    "responses": {
+      "exit_code": 0
+    }
+  },
+  "no_unexpected_failures": true,
+  "date": "2026-10-22",
+  "hardware": "NVIDIA GB10 (ASUS GX10), aarch64",
+  "candidate_image": "qwen38-flash-dgx:repo-v032-review-20261022",
+  "candidate_image_id": "sha256:6a05cafe0c8025c8ac6e3dfe9931c67d550aedc3d6cf9f58f76f27aa3cc6fc2e",
+  "build": {
+    "passed": true,
+    "network": "none",
+    "cached_layers_reused": true,
+    "patch_fuzz": 0,
+    "fp4_local_code_included": false
+  },
+  "optional_memory_diagnostic_build": {
+    "passed": true,
+    "image_id": "sha256:ff58b1adc3a1f7016e1959761317a794975a112eed65cb47c05e6f1d32110384"
+  },
+  "runtime_identity": {
+    "reference_image_id": "sha256:e726e3294db084152855439bc3bed05ca38189a3bb7b0d5465936f21c5f407b8",
+    "reference_gpu_validation": "../VALIDATION.json",
+    "scope": "All vllm/**/*.py, top-level vllm_*.py, /opt/llm/kernel-det/*.so",
+    "files_compared": 2883,
+    "different_files": 0,
+    "canonical_manifest_sha256": "afd2142516203b48fd4c3ae6c1f09f7d457fdd3ace23149ec4a9a33d411e06eb",
+    "whole_image_or_dependency_identity_claimed": false
+  },
+  "known_failure": "The schema author namespace case remains the sole expected failure (22/23); the schema runner accepts only that exact outcome.",
+  "upstream_parser_suite": "Not rerun in this review; previous candidate and baseline were both 5913/5914 (see ../VALIDATION.json).",
+  "new_gpu_inference_in_this_review": false,
+  "production_container_modified": false,
+  "local_checks": [
+    "Python AST and JSON parsing",
+    "bash -n",
+    "git diff --check",
+    "relative documentation links",
+    "unchanged profile files",
+    "three memory-diagnostic unit checks"
+  ]
+}

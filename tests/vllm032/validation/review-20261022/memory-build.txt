@@ -1,0 +1,32 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile.memory-diagnostics
+#1 transferring dockerfile: 465B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/qwen38-flash-dgx:repo-v032-review-20261022
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 75B done
+#3 DONE 0.0s
+
+#4 [internal] load build context
+#4 transferring context: 4.89kB done
+#4 DONE 0.0s
+
+#5 [1/3] FROM docker.io/library/qwen38-flash-dgx:repo-v032-review-20261022
+#5 DONE 0.2s
+
+#6 [2/3] COPY tools/patch_memory_profile_logging.py /tmp/patch_memory_profile_logging.py
+#6 DONE 0.0s
+
+#7 [3/3] RUN python3 /tmp/patch_memory_profile_logging.py /usr/local/lib/python3.12/dist-packages  && rm /tmp/patch_memory_profile_logging.py
+#7 0.075 Startup memory logging installed; allocation and budget logic unchanged
+#7 DONE 0.1s
+
+#8 exporting to image
+#8 exporting layers done
+#8 writing image sha256:ff58b1adc3a1f7016e1959761317a794975a112eed65cb47c05e6f1d32110384 done
+#8 naming to docker.io/library/qwen38-flash-dgx:repo-v032-memory-review-20261022 done
+#8 DONE 0.0s
