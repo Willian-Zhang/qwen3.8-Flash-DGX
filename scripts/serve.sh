@@ -61,11 +61,11 @@
 #                     which this script recreates every time, so they are rebuilt on every boot
 #                     (~37 s of startup, see README). A bare name becomes docker volumes, an
 #                     absolute path binds dirs
-#   IMAGE=qwen38-flash-dgx:v0.30   MODEL=nvidia/Qwen3.8-Flash-Next-NVFP4   (RadixArk/Qwen3.8-Flash-Next-NVFP4 still supported: MODEL=...)
+#   IMAGE=qwen38-flash-dgx:v0.32   MODEL=nvidia/Qwen3.8-Flash-Next-NVFP4   (RadixArk/Qwen3.8-Flash-Next-NVFP4 still supported: MODEL=...)
 set -euo pipefail
 
 NAME="${NAME:-qwen38-flash}"
-IMAGE="${IMAGE:-qwen38-flash-dgx:v0.31}"
+IMAGE="${IMAGE:-qwen38-flash-dgx:v0.32}"
 MODEL="${MODEL:-nvidia/Qwen3.8-Flash-Next-NVFP4}"   # default since 2026-09-14; see README "Checkpoints"
 SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-qwen3.8-flash-next}"
 HF_CACHE="${HF_CACHE:-$HOME/.cache/huggingface}"
@@ -192,7 +192,7 @@ fi
 # Older preview/v0.29 builds have different op names and patches.
 BASE="$(docker image inspect -f '{{index .Config.Labels "qwen38.base"}}' "$IMAGE" 2>/dev/null || true)"
 case "$BASE" in
-  v0.31) ;;
+  v0.32) ;;
   *) echo "!! $IMAGE has unsupported base '${BASE:-missing or unlabeled}'; rebuild this recipe with ./flash setup"; exit 1 ;;
 esac
 
@@ -213,7 +213,8 @@ if [ "$YARN" != 0 ]; then OVR_ARGS=(--hf-overrides "$YARN_OVR"); ALLOW_LONG=1; f
 # MTP + YaRN: dict hf_overrides are not propagated to the draft model, whose
 # max_model_len then stays 262144 and vLLM aborts with
 # "--mamba-block-size can only be set with --enable-prefix-caching". Forcing the
-# draft's max_model_len through the speculative config fixes it.
+# draft's max_model_len through the speculative config fixes that startup check.
+# This sets the length limit only; it does not copy YaRN's RoPE parameters to MTP.
 SPEC=()
 if [ "$MTP" != 0 ]; then
   if [ "$YARN" != 0 ]; then

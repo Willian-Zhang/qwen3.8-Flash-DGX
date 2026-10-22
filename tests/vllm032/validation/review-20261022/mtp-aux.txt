@@ -1,0 +1,9 @@
+test_aux_disabled_control (__main__.MtpAuxOutputTest.test_aux_disabled_control) ... ok
+test_draft_disables_aux_without_mutating_target (__main__.MtpAuxOutputTest.test_draft_disables_aux_without_mutating_target) ... ok
+test_real_guard_reproduces_inherited_aux_failure (__main__.MtpAuxOutputTest.test_real_guard_reproduces_inherited_aux_failure) ... ok
+test_target_restrictions_remain_enforced (__main__.MtpAuxOutputTest.test_target_restrictions_remain_enforced) ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in 0.004s
+
+OK

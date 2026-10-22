@@ -2,7 +2,7 @@
 """Add startup memory diagnostics to a disposable vLLM image (issue #51).
 
 Only adds logging to MemorySnapshot.measure and memory_profiling; it does not
-change allocation, profiling or KV-budget decisions. Supports the v0.30/v0.31
+change allocation, profiling or KV-budget decisions. Supports the v0.30/v0.31/v0.32
 anchors and refuses unexpected source layouts before writing anything.
 """
 

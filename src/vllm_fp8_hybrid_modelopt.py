@@ -131,13 +131,43 @@ def _patch(cfg_cls) -> None:
 # ---------------------------------------------------------------------------
 # QSA qkv_proj: qsa.py builds it with ``model.without_modelopt_fp4(quant_config)``,
 # which returns None for ModelOpt-FP4 checkpoints (bf16 path, shim never consulted).
-# Dockerfile.hybrid redirects that call here: we hand the layer a thin proxy that
+# Dockerfile redirects that call here: we hand the layer a thin proxy that
 # dispatches to blockwise fp8 when the checkpoint has fp8 q/k/v for that prefix,
 # and to the plain bf16 method otherwise (identical to the original behaviour).
 # ---------------------------------------------------------------------------
+def qsa_requires_separate_projections(quant_config, prefix):
+    """Keep existing blockwise-FP8 QKV/indexer weights in separate linears.
+
+    v0.32 adds an indexer shard to the QKV packed-module mapping. Its
+    quantization scheme can differ from Q/K/V, so sharing that mapping
+    would choose the wrong allocation or load it with the QKV scales. The
+    unfused upstream path retains both checkpoint layouts and still uses
+    the fused pre-indexer kernels.
+    """
+    return bool(
+        _enabled()
+        and quant_config is not None
+        and hasattr(quant_config, "_is_fp8_layer")
+        and (
+            quant_config._is_fp8_layer(f"{prefix}.qkv_proj")
+            or quant_config._is_fp8_layer(f"{prefix}.indexer.index_qk_proj")
+        )
+    )
+
+
 def excluded_quant_config(quant_config):
     if quant_config is None:
         return None
+    if _enabled() and hasattr(quant_config, "_is_fp8_layer"):
+        # v0.32 includes the (usually BF16) indexer in QKV's packed mapping.
+        # Restore the three Q/K/V names before constructing the first linear:
+        # otherwise the all-FP8 check incorrectly selects BF16 and the loader
+        # has nowhere to put the checkpoint's weight_scale_inv tensors.
+        mapping = quant_config.packed_modules_mapping
+        if mapping and mapping.get("qkv_proj") == [
+            "q_proj", "k_proj", "v_proj", "indexer.index_qk_proj"
+        ]:
+            mapping["qkv_proj"] = ["q_proj", "k_proj", "v_proj"]
     if quant_config.get_name() != "modelopt_fp4":
         return quant_config
     if not _enabled() or not hasattr(quant_config, "_is_fp8_layer"):

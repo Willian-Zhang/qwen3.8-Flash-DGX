@@ -1,0 +1,8 @@
+W1021 21:43:44.498000 1 torch/utils/cpp_extension.py:178] No CUDA runtime is found, using CUDA_HOME='/usr/local/cuda'
+test_native_reasoning_event_names_and_item_ids (__main__.ResponsesV032.test_native_reasoning_event_names_and_item_ids) ... ok
+test_tool_item_ids_match_terminal_response (__main__.ResponsesV032.test_tool_item_ids_match_terminal_response) ... ok
+
+----------------------------------------------------------------------
+Ran 2 tests in 2.097s
+
+OK

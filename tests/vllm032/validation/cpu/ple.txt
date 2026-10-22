@@ -1,0 +1,10 @@
+gather n=      1: OK in    0.10 ms
+gather n=     16: OK in    0.12 ms
+gather n=   5000: OK in    3.35 ms
+gather n= 131072: OK in   23.69 ms
+placeholder forward: OK (fp8 view, shape (300, 16, 160) )
+phase stats: OK (gpu-wait 0.00 ms/op, host 9.55 ms/op (dedup 0.50, gather 7.46, stage 1.59))
+zeros path: OK
+out-of-range: raises IndexError OK
+prewarm: OK
+ALL OK

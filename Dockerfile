@@ -1,4 +1,4 @@
-# Qwen3.8-Flash-Next on a DGX Spark — the official vLLM v0.31.0 image plus these patches:
+# Qwen3.8-Flash-Next on a DGX Spark — the official vLLM v0.32.0 image plus these patches:
 #   1 PLE mmap, 2 GB10 FLA fixes, 4 prefix-caching block_size fix, 5 exact top-k, 6 hybrid mode,
 #   8 deterministic top-k kernel, 10 reduced draft vocabulary, 12 Qwen tool preamble fix,
 #   13 quoted Qwen tool markers stay text, 14 MoE weight-load clone (#33), 15-18 the rest of weight
@@ -7,9 +7,9 @@
 # Upstream now: 3 (vllm#50729), 7 (vllm#55557), 9 (vllm#52775),
 # 11 (vllm#55513), 16 (vllm#58720). Older bases remain in git history.
 #
-#   docker build -t qwen38-flash-dgx:v0.31 .
-FROM vllm/vllm-openai:v0.31.0
-LABEL qwen38.base=v0.31
+#   docker build -t qwen38-flash-dgx:v0.32 .
+FROM vllm/vllm-openai:v0.32.0
+LABEL qwen38.base=v0.32
 ARG SP=/usr/local/lib/python3.12/dist-packages
 ARG PKG=${SP}/vllm/models/qwen4_exp/nvidia
 ARG PLE=${PKG}/ngram_embedding.py
@@ -45,8 +45,9 @@ RUN cp ${MO} ${MO}.orig \
  && python3 -c "import ast; ast.parse(open('${MO}').read()); print('modelopt.py hooked OK')" \
  && cp ${QSA} ${QSA}.orig \
  && sed -i 's/quant_config=model\.without_modelopt_fp4(quant_config)/quant_config=_fp8_hybrid_excluded(quant_config)/' ${QSA} \
- && sed -i 's/^from \. import model$/from . import model\nfrom vllm_fp8_hybrid_modelopt import excluded_quant_config as _fp8_hybrid_excluded/' ${QSA} \
- && grep -q "_fp8_hybrid_excluded(quant_config)" ${QSA} && grep -q "^from vllm_fp8_hybrid_modelopt import" ${QSA} \
+ && sed -i 's/^from \. import model$/from . import model\nfrom vllm_fp8_hybrid_modelopt import excluded_quant_config as _fp8_hybrid_excluded, qsa_requires_separate_projections as _fp8_hybrid_separate_qsa/' ${QSA} \
+ && sed -i 's/self.fuse_indexer_projection = vllm_config.lora_config is None/self.fuse_indexer_projection = (vllm_config.lora_config is None and not _fp8_hybrid_separate_qsa(quant_config, prefix))/' ${QSA} \
+ && grep -q '_fp8_hybrid_separate_qsa(quant_config, prefix)' ${QSA} && grep -q "_fp8_hybrid_excluded(quant_config)" ${QSA} && grep -q "^from vllm_fp8_hybrid_modelopt import" ${QSA} \
  && python3 -c "import ast; ast.parse(open('${QSA}').read()); print('qsa.py hooked OK')"
 
 # --- 7. fp8_e4m3 main KV cache on the QSA path (--kv-cache-dtype fp8_e4m3; KV_DTYPE=fp8_e4m3) ---
@@ -91,7 +92,7 @@ RUN cd ${SP} && patch --batch --forward --fuzz=0 -p1 < /tmp/qwen-tool-marker-gua
  && rm /tmp/qwen-tool-marker-guard.patch
 
 # --- 19. Qwen token identity and truthful Responses terminal events (issue #31) ---
-# Ported from Chaos2522's source bundle to v0.31; requires patches 12 and 13.
+# Ported from Chaos2522's source bundle to v0.32; requires patches 12 and 13.
 # No sampling/weight/KV changes. Responses buffers complete XML arguments;
 # Chat Completions retains its incremental argument streaming.
 COPY src/patches/qwen-safe-output.patch /tmp/qwen-safe-output.patch

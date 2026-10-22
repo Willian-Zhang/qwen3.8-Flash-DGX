@@ -1,0 +1,17 @@
+## 2. Single-stream decode (code, thinking off)
+   runs: 47.9, 48.8, 49.3
+   MEDIAN 48.8 tok/s
+
+## 3. Concurrency sweep
+   streams  wall(s)    aggregate   per-stream  TTFT p50  TTFT max
+   ----------------------------------------------------------------
+         1      5.8      44.4 t/s      44.4 t/s     0.29s     0.29s
+         4      9.8     104.3 t/s      28.0 t/s     0.42s     0.42s
+         8     12.2     168.5 t/s      21.7 t/s     0.50s     0.50s
+
+   peak aggregate 168.5 tok/s at 8 streams
+
+## 4. Long-context prefill
+   prompt    9726 tok -> TTFT   1.12s   prefill ~   8678 tok/s
+   prompt   38726 tok -> TTFT   1.05s   prefill ~  36909 tok/s
+   prompt  120893 tok -> TTFT   1.22s   prefill ~  98797 tok/s

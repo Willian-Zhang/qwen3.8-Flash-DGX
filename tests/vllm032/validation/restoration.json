@@ -1,0 +1,10 @@
+{
+  "restored": true,
+  "health_http_status": 200,
+  "image_id": "sha256:d8a21af8e0baa3ca3183546496355787da7b37fa181d273b0f8a25b8fff2a102",
+  "same_container": true,
+  "same_image": true,
+  "same_command": true,
+  "same_environment": true,
+  "completion_text": " Paris, a city renowned for its iconic"
+}

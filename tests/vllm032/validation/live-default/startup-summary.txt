@@ -1,0 +1,6 @@
+2026-10-21T22:04:53.726125607Z (EngineCore pid=234) INFO 10-21 22:04:53 [model_runner.py:424] Model loading took 74.44 GiB memory and 84.338250 seconds
+2026-10-21T22:05:53.909257254Z (EngineCore pid=234) INFO 10-21 22:05:53 [model_runner.py:1127] Graph capturing finished in 25 secs, took 2.01 GiB
+2026-10-21T22:05:54.184527396Z (EngineCore pid=234) INFO 10-21 22:05:54 [gpu_worker.py:759] Available KV cache memory: 16.43 GiB
+2026-10-21T22:05:54.199422991Z (EngineCore pid=234) INFO 10-21 22:05:54 [kv_cache_utils.py:2327] GPU KV cache size: 607,575 tokens, Maximum concurrency for 500,000 tokens per request: 1.22x
+2026-10-21T22:06:23.838645732Z (EngineCore pid=234) INFO 10-21 22:06:23 [model_runner.py:1127] Graph capturing finished in 2 secs, took 0.94 GiB
+2026-10-21T22:06:24.539352466Z (EngineCore pid=234) INFO 10-21 22:06:24 [core.py:402] init engine (profile, create kv cache, warmup model) took 90.76 s

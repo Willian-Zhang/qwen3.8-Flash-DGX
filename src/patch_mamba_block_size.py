@@ -12,9 +12,18 @@ MH = f"{SP}/vllm/v1/worker/gpu/model_states/mamba_hybrid.py"
 SC = f"{SP}/vllm/v1/core/sched/scheduler.py"
 s = open(MH).read()
 a = "                (new_req_data.num_computed_tokens - 1) // self.cache_config.block_size\n"
-assert s.count(a) == 1, "mamba_hybrid seed line not found"
-s = s.replace(a, "                (new_req_data.num_computed_tokens - 1)\n"
-                 "                // (self.cache_config.mamba_block_size or self.cache_config.block_size)\n")
+native = (
+    "            mamba_block_size = self.cache_config.mamba_block_size\n"
+    "            assert mamba_block_size is not None\n"
+    "            self._mamba_state_idx_gpu[req_index].fill_(\n"
+    "                (new_req_data.num_computed_tokens - 1) // mamba_block_size\n"
+)
+if native in s:
+    print("mamba state seed fix is native upstream")
+else:
+    assert s.count(a) == 1, "mamba_hybrid seed line not found"
+    s = s.replace(a, "                (new_req_data.num_computed_tokens - 1)\n"
+                     "                // (self.cache_config.mamba_block_size or self.cache_config.block_size)\n")
 open(MH, "w").write(s)
 t = open(SC).read()
 b = "        block_size = self.cache_config.block_size\n        # The last block-aligned position whose state can be cached."

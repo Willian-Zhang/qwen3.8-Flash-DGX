@@ -1,0 +1,9 @@
+test_disabled_hybrid_never_changes_layout (__main__.QSAProjectionLayout.test_disabled_hybrid_never_changes_layout) ... ok
+test_fp8_indexer_also_requires_separate_scales (__main__.QSAProjectionLayout.test_fp8_indexer_also_requires_separate_scales) ... ok
+test_fp8_qkv_keeps_checkpoint_layout (__main__.QSAProjectionLayout.test_fp8_qkv_keeps_checkpoint_layout) ... ok
+test_nonhybrid_layers_keep_upstream_fusion (__main__.QSAProjectionLayout.test_nonhybrid_layers_keep_upstream_fusion) ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in 0.000s
+
+OK
