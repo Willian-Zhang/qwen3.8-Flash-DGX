@@ -1,0 +1,201 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 10.46kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/vllm/vllm-openai:v0.32.0
+#2 DONE 0.8s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 75B done
+#3 DONE 0.0s
+
+#4 [internal] load build context
+#4 transferring context: 408.06kB done
+#4 DONE 0.0s
+
+#5 [ 1/37] FROM docker.io/vllm/vllm-openai:v0.32.0@sha256:befccf0e7e4089aa23926bb6f887a85c0d46c2a99e6de5c5ffdf5cb7957c5b34
+#5 CACHED
+
+#6 [12/37] ADD --checksum=sha256:138cacfc5eb117f0922d53c88727e4d0dc26dcfb246c3d401fc280cfc726cc71 https://raw.githubusercontent.com/jschmied/qwen38-flash-next-gb10/e0ef69d4f5575dad00d34e05479eaf4c6547bace/patches/kernel-det/build_det.py /opt/llm/kernel-det/src/build_det.py
+#6 CACHED
+
+#7 [13/37] ADD --checksum=sha256:b103fbeaf7589b9468471142ad0b30012a076f93d20ba11fc5ff6dcb1ecd32a6 https://raw.githubusercontent.com/jschmied/qwen38-flash-next-gb10/e0ef69d4f5575dad00d34e05479eaf4c6547bace/patches/kernel-det/bindings_det.cpp /opt/llm/kernel-det/src/bindings_det.cpp
+#7 CACHED
+
+#8 [14/37] ADD --checksum=sha256:19e1d53425ea9a839445722fd1dac1c41727128eebdce84508c1bfb8592afecf https://raw.githubusercontent.com/jschmied/qwen38-flash-next-gb10/e0ef69d4f5575dad00d34e05479eaf4c6547bace/patches/kernel-det/topk_det.cu /opt/llm/kernel-det/src/topk_det.cu
+#8 CACHED
+
+#9 [15/37] ADD --checksum=sha256:16939700ae389750782ff5c0d5b9caef59aa0ff8b869b64ec94fa72c814910ee https://raw.githubusercontent.com/jschmied/qwen38-flash-next-gb10/e0ef69d4f5575dad00d34e05479eaf4c6547bace/patches/kernel-det/torch_utils.h /opt/llm/kernel-det/src/torch_utils.h
+#9 CACHED
+
+#10 [16/37] ADD --checksum=sha256:b4ef9ce298d43d6c0e6db9fcca451df20815b2cfe33791919c1ad9c0e84f0ba7 https://raw.githubusercontent.com/jschmied/qwen38-flash-next-gb10/e0ef69d4f5575dad00d34e05479eaf4c6547bace/patches/kernel-det/persistent_topk.cuh /opt/llm/kernel-det/src/persistent_topk.cuh
+#10 CACHED
+
+#11 [ 2/37] COPY src/vllm_ple_mmap.py /usr/local/lib/python3.12/dist-packages/vllm_ple_mmap.py
+#11 DONE 0.0s
+
+#12 [ 3/37] RUN cp /usr/local/lib/python3.12/dist-packages/vllm/models/qwen4_exp/nvidia/ngram_embedding.py /usr/local/lib/python3.12/dist-packages/vllm/models/qwen4_exp/nvidia/ngram_embedding.py.orig  && printf '\n\n# --- qwen38-flash-dgx: serve the PLE n-gram table from disk (VLLM_PLE_MMAP=1) ---\nfrom vllm_ple_mmap import apply as _ple_mmap_apply\n_ple_mmap_apply(Qwen4ExpNGramEmbedding)\n' >> /usr/local/lib/python3.12/dist-packages/vllm/models/qwen4_exp/nvidia/ngram_embedding.py  && python3 -c "import ast; ast.parse(open('/usr/local/lib/python3.12/dist-packages/vllm/models/qwen4_exp/nvidia/ngram_embedding.py').read()); print('ngram_embedding.py patched OK')"
+#12 0.072 ngram_embedding.py patched OK
+#12 DONE 0.1s
+
+#13 [ 4/37] RUN sed -i 's|DEFAULT = 102400|DEFAULT = 101376  # spark-fla-shmem: GB10 99KiB, big GDN tiles fit|' /usr/local/lib/python3.12/dist-packages/vllm/third_party/flash_linear_attention/ops/utils.py  && grep -q "spark-fla-shmem" /usr/local/lib/python3.12/dist-packages/vllm/third_party/flash_linear_attention/ops/utils.py && echo "fla shmem gate patched"  && sed -i 's|for num_warps in \[2, 4\]|for num_warps in [2]  # spark-fla-warps: fla#953 Blackwell tl.dot race|' /usr/local/lib/python3.12/dist-packages/vllm/third_party/flash_linear_attention/ops/chunk_delta_h.py  && grep -q "spark-fla-warps" /usr/local/lib/python3.12/dist-packages/vllm/third_party/flash_linear_attention/ops/chunk_delta_h.py && echo "fla num_warps pinned"
+#13 0.050 fla shmem gate patched
+#13 0.052 fla num_warps pinned
+#13 DONE 0.1s
+
+#14 [ 5/37] COPY src/patch_mamba_block_size.py /tmp/patch_mamba_block_size.py
+#14 DONE 0.0s
+
+#15 [ 6/37] RUN python3 /tmp/patch_mamba_block_size.py /usr/local/lib/python3.12/dist-packages && rm /tmp/patch_mamba_block_size.py
+#15 0.075 mamba state seed fix is native upstream
+#15 0.075 mamba block_size fix applied OK
+#15 DONE 0.1s
+
+#16 [ 7/37] COPY src/patch_qsa_exact_topk.py /tmp/patch_qsa_exact_topk.py
+#16 DONE 0.0s
+
+#17 [ 8/37] RUN python3 /tmp/patch_qsa_exact_topk.py /usr/local/lib/python3.12/dist-packages/vllm/models/qwen4_exp/nvidia/ops/qsa_indexer.py && rm /tmp/patch_qsa_exact_topk.py
+#17 0.056 qsa_indexer.py: top-k variants (1|fill) added OK
+#17 DONE 0.1s
+
+#18 [ 9/37] COPY src/vllm_fp8_hybrid_modelopt.py /usr/local/lib/python3.12/dist-packages/vllm_fp8_hybrid_modelopt.py
+#18 DONE 0.0s
+
+#19 [10/37] RUN cp /usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/modelopt.py /usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/modelopt.py.orig  && printf '\n\n# --- qwen38-flash-dgx: NVFP4 + blockwise-fp8 side layers (VLLM_FP8_HYBRID=1) ---\nfrom vllm_fp8_hybrid_modelopt import apply as _fp8_hybrid_apply\n_fp8_hybrid_apply()\n' >> /usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/modelopt.py  && python3 -c "import ast; ast.parse(open('/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/modelopt.py').read()); print('modelopt.py hooked OK')"  && cp /usr/local/lib/python3.12/dist-packages/vllm/models/qwen4_exp/nvidia/qsa.py /usr/local/lib/python3.12/dist-packages/vllm/models/qwen4_exp/nvidia/qsa.py.orig  && sed -i 's/quant_config=model\.without_modelopt_fp4(quant_config)/quant_config=_fp8_hybrid_excluded(quant_config)/' /usr/local/lib/python3.12/dist-packages/vllm/models/qwen4_exp/nvidia/qsa.py  && sed -i 's/^from \. import model$/from . import model\nfrom vllm_fp8_hybrid_modelopt import excluded_quant_config as _fp8_hybrid_excluded, qsa_requires_separate_projections as _fp8_hybrid_separate_qsa/' /usr/local/lib/python3.12/dist-packages/vllm/models/qwen4_exp/nvidia/qsa.py  && sed -i 's/self.fuse_indexer_projection = vllm_config.lora_config is None/self.fuse_indexer_projection = (vllm_config.lora_config is None and not _fp8_hybrid_separate_qsa(quant_config, prefix))/' /usr/local/lib/python3.12/dist-packages/vllm/models/qwen4_exp/nvidia/qsa.py  && grep -q '_fp8_hybrid_separate_qsa(quant_config, prefix)' /usr/local/lib/python3.12/dist-packages/vllm/models/qwen4_exp/nvidia/qsa.py && grep -q "_fp8_hybrid_excluded(quant_config)" /usr/local/lib/python3.12/dist-packages/vllm/models/qwen4_exp/nvidia/qsa.py && grep -q "^from vllm_fp8_hybrid_modelopt import" /usr/local/lib/python3.12/dist-packages/vllm/models/qwen4_exp/nvidia/qsa.py  && python3 -c "import ast; ast.parse(open('/usr/local/lib/python3.12/dist-packages/vllm/models/qwen4_exp/nvidia/qsa.py').read()); print('qsa.py hooked OK')"
+#19 0.080 modelopt.py hooked OK
+#19 0.103 qsa.py hooked OK
+#19 DONE 0.1s
+
+#20 [11/37] RUN grep -q 'IS_FP8=is_fp8' /usr/local/lib/python3.12/dist-packages/vllm/models/qwen4_exp/nvidia/ops/qsa.py && grep -q '"fp8_e4m3"' /usr/local/lib/python3.12/dist-packages/vllm/models/qwen4_exp/nvidia/qsa.py
+#20 DONE 0.0s
+
+#21 [12/37] ADD --checksum=sha256:138cacfc5eb117f0922d53c88727e4d0dc26dcfb246c3d401fc280cfc726cc71 https://raw.githubusercontent.com/jschmied/qwen38-flash-next-gb10/e0ef69d4f5575dad00d34e05479eaf4c6547bace/patches/kernel-det/build_det.py /opt/llm/kernel-det/src/build_det.py
+#21 DONE 0.0s
+
+#22 [13/37] ADD --checksum=sha256:b103fbeaf7589b9468471142ad0b30012a076f93d20ba11fc5ff6dcb1ecd32a6 https://raw.githubusercontent.com/jschmied/qwen38-flash-next-gb10/e0ef69d4f5575dad00d34e05479eaf4c6547bace/patches/kernel-det/bindings_det.cpp /opt/llm/kernel-det/src/bindings_det.cpp
+#22 DONE 0.0s
+
+#23 [14/37] ADD --checksum=sha256:19e1d53425ea9a839445722fd1dac1c41727128eebdce84508c1bfb8592afecf https://raw.githubusercontent.com/jschmied/qwen38-flash-next-gb10/e0ef69d4f5575dad00d34e05479eaf4c6547bace/patches/kernel-det/topk_det.cu /opt/llm/kernel-det/src/topk_det.cu
+#23 DONE 0.0s
+
+#24 [15/37] ADD --checksum=sha256:16939700ae389750782ff5c0d5b9caef59aa0ff8b869b64ec94fa72c814910ee https://raw.githubusercontent.com/jschmied/qwen38-flash-next-gb10/e0ef69d4f5575dad00d34e05479eaf4c6547bace/patches/kernel-det/torch_utils.h /opt/llm/kernel-det/src/torch_utils.h
+#24 DONE 0.0s
+
+#25 [16/37] ADD --checksum=sha256:b4ef9ce298d43d6c0e6db9fcca451df20815b2cfe33791919c1ad9c0e84f0ba7 https://raw.githubusercontent.com/jschmied/qwen38-flash-next-gb10/e0ef69d4f5575dad00d34e05479eaf4c6547bace/patches/kernel-det/persistent_topk.cuh /opt/llm/kernel-det/src/persistent_topk.cuh
+#25 DONE 0.0s
+
+#26 [17/37] COPY src/patch_qsadet.py /tmp/patch_qsadet.py
+#26 DONE 0.0s
+
+#27 [18/37] RUN cd /opt/llm/kernel-det/src && DET_BUILD_DIR=/opt/llm/kernel-det/build DET_ARCH=121a python3 build_det.py 2>&1 | tail -2  && cp /opt/llm/kernel-det/build/_C_det.so /opt/llm/kernel-det/_C_det.so  && python3 /tmp/patch_qsadet.py /usr/local/lib/python3.12/dist-packages/vllm/models/qwen4_exp/nvidia/ops/qsa_indexer.py && rm /tmp/patch_qsadet.py  && python3 -c "import ast; ast.parse(open('/usr/local/lib/python3.12/dist-packages/vllm/models/qwen4_exp/nvidia/ops/qsa_indexer.py').read()); print('qsadet wired OK')"
+#27 8.775 built: /opt/llm/kernel-det/build/_C_det.so
+#27 8.775 op: _C_det.persistent_topk
+#27 8.797   qsadet INSTALLED in /usr/local/lib/python3.12/dist-packages/vllm/models/qwen4_exp/nvidia/ops/qsa_indexer.py (holder _topk; inert unless VLLM_QSA_DET_TOPK=1)
+#27 8.810 qsadet wired OK
+#27 DONE 8.8s
+
+#28 [19/37] COPY src/patch_mtp_draft_vocab.py /tmp/patch_mtp_draft_vocab.py
+#28 DONE 0.0s
+
+#29 [20/37] COPY src/draft_vocab_65536.npy /opt/llm/draft_vocab_65536.npy
+#29 DONE 0.0s
+
+#30 [21/37] RUN python3 /tmp/patch_mtp_draft_vocab.py /usr/local/lib/python3.12/dist-packages/vllm/models/qwen4_exp/nvidia/mtp.py && rm /tmp/patch_mtp_draft_vocab.py
+#30 0.074   draft-vocab hook INSTALLED in /usr/local/lib/python3.12/dist-packages/vllm/models/qwen4_exp/nvidia/mtp.py (inert unless VLLM_MTP_DRAFT_VOCAB is set)
+#30 DONE 0.1s
+
+#31 [22/37] COPY src/patches/qwen-tool-preamble.patch /tmp/qwen-tool-preamble.patch
+#31 DONE 0.0s
+
+#32 [23/37] RUN cd /usr/local/lib/python3.12/dist-packages && patch --batch --forward --fuzz=0 -p1 < /tmp/qwen-tool-preamble.patch  && rm /tmp/qwen-tool-preamble.patch
+#32 0.053 patching file vllm/parser/engine/parser_engine_config.py
+#32 0.053 Hunk #1 succeeded at 109 (offset 6 lines).
+#32 0.054 patching file vllm/parser/engine/streaming_parser_engine.py
+#32 0.054 Hunk #1 succeeded at 216 (offset 6 lines).
+#32 0.054 Hunk #2 succeeded at 299 (offset 7 lines).
+#32 0.054 Hunk #3 succeeded at 412 (offset 12 lines).
+#32 0.054 Hunk #4 succeeded at 448 (offset 12 lines).
+#32 0.054 Hunk #5 succeeded at 515 (offset 12 lines).
+#32 0.054 Hunk #6 succeeded at 564 (offset 14 lines).
+#32 0.055 patching file vllm/parser/nemotron_v3.py
+#32 0.055 patching file vllm/parser/qwen3.py
+#32 DONE 0.1s
+
+#33 [24/37] COPY src/patches/qwen-tool-marker-guard.patch /tmp/qwen-tool-marker-guard.patch
+#33 DONE 0.0s
+
+#34 [25/37] RUN cd /usr/local/lib/python3.12/dist-packages && patch --batch --forward --fuzz=0 -p1 < /tmp/qwen-tool-marker-guard.patch  && rm /tmp/qwen-tool-marker-guard.patch
+#34 0.047 patching file vllm/parser/engine/parser_engine_config.py
+#34 0.047 Hunk #1 succeeded at 112 (offset 6 lines).
+#34 0.048 patching file vllm/parser/engine/streaming_parser_engine.py
+#34 0.048 Hunk #2 succeeded at 226 (offset 6 lines).
+#34 0.048 Hunk #3 succeeded at 458 (offset 12 lines).
+#34 0.048 Hunk #4 succeeded at 532 (offset 12 lines).
+#34 0.049 patching file vllm/parser/qwen3.py
+#34 DONE 0.1s
+
+#35 [26/37] COPY src/patches/qwen-safe-output.patch /tmp/qwen-safe-output.patch
+#35 DONE 0.0s
+
+#36 [27/37] RUN cd /usr/local/lib/python3.12/dist-packages && patch --batch --forward --fuzz=0 -p1 < /tmp/qwen-safe-output.patch  && rm /tmp/qwen-safe-output.patch
+#36 0.056 patching file vllm/entrypoints/openai/responses/protocol.py
+#36 0.057 patching file vllm/entrypoints/openai/responses/serving.py
+#36 0.057 patching file vllm/parser/abstract_parser.py
+#36 0.058 patching file vllm/parser/engine/adapters.py
+#36 0.058 patching file vllm/parser/engine/parser_engine.py
+#36 0.059 patching file vllm/parser/engine/parser_engine_config.py
+#36 0.059 patching file vllm/parser/engine/streaming_parser_engine.py
+#36 0.059 patching file vllm/parser/qwen3.py
+#36 DONE 0.1s
+
+#37 [28/37] COPY src/patch_moe_load_clone.py /tmp/patch_moe_load_clone.py
+#37 DONE 0.0s
+
+#38 [29/37] RUN python3 /tmp/patch_moe_load_clone.py /usr/local/lib/python3.12/dist-packages && rm /tmp/patch_moe_load_clone.py
+#38 0.078 routed_experts.py: MoE load clone applied OK
+#38 DONE 0.1s
+
+#39 [30/37] COPY src/patch_load_pread.py src/patch_embed_chunked_copy.py      src/patch_mtp_name_prefilter.py /tmp/
+#39 DONE 0.0s
+
+#40 [31/37] RUN python3 /tmp/patch_load_pread.py /usr/local/lib/python3.12/dist-packages  && grep -q 'mapping_by_expert = _index_expert_mapping' /usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fused_moe/routed_experts.py  && python3 /tmp/patch_embed_chunked_copy.py /usr/local/lib/python3.12/dist-packages && python3 /tmp/patch_mtp_name_prefilter.py /usr/local/lib/python3.12/dist-packages  && rm /tmp/patch_load_pread.py /tmp/patch_embed_chunked_copy.py        /tmp/patch_mtp_name_prefilter.py
+#40 0.088 weight_utils.py: pread loader applied OK; routed_experts.py: clone skip for pread tensors OK
+#40 0.115 vocab_parallel_embedding.py: chunked embedding copy applied OK
+#40 0.150 weight_utils.py + mtp.py: MTP name prefilter applied OK
+#40 DONE 0.2s
+
+#41 [32/37] COPY src/patches/qwen-mtp-aux-output.patch /tmp/qwen-mtp-aux-output.patch
+#41 DONE 0.0s
+
+#42 [33/37] RUN cd /usr/local/lib/python3.12/dist-packages && patch --batch --forward --fuzz=0 -p1 < /tmp/qwen-mtp-aux-output.patch  && rm /tmp/qwen-mtp-aux-output.patch
+#42 0.044 patching file vllm/models/qwen4_exp/nvidia/mtp.py
+#42 0.044 Hunk #2 succeeded at 166 (offset 3 lines).
+#42 DONE 0.0s
+
+#43 [34/37] COPY src/patches/qwen-tool-argument-schema.patch /tmp/qwen-tool-argument-schema.patch
+#43 DONE 0.0s
+
+#44 [35/37] RUN cd /usr/local/lib/python3.12/dist-packages && patch --batch --forward --fuzz=0 -p1 < /tmp/qwen-tool-argument-schema.patch  && python3 -c "import ast, jsonschema, referencing; ast.parse(open('/usr/local/lib/python3.12/dist-packages/vllm/parser/engine/argument_validation.py').read())"  && rm /tmp/qwen-tool-argument-schema.patch
+#44 0.054 patching file vllm/parser/engine/parser_engine.py
+#44 0.054 patching file vllm/parser/qwen3.py
+#44 0.054 patching file vllm/parser/engine/adapters.py
+#44 0.054 patching file vllm/parser/abstract_parser.py
+#44 0.055 patching file vllm/entrypoints/openai/responses/serving.py
+#44 0.055 patching file vllm/parser/engine/argument_validation.py
+#44 DONE 0.1s
+
+#45 [36/37] COPY src/patches/qwen-mrope-cache-window.patch /tmp/qwen-mrope-cache-window.patch
+#45 DONE 0.0s
+
+#46 [37/37] RUN cd /usr/local/lib/python3.12/dist-packages && patch --batch --forward --fuzz=0 -p1 < /tmp/qwen-mrope-cache-window.patch  && python3 -c "import ast; ast.parse(open('/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/rotary_embedding/mrope.py').read())"  && rm /tmp/qwen-mrope-cache-window.patch
+#46 0.047 patching file vllm/model_executor/layers/rotary_embedding/mrope.py
+#46 DONE 0.1s
+
+#47 exporting to image
+#47 exporting layers
+#47 exporting layers 0.2s done
+#47 writing image sha256:949814a496df738fd60f3f1fc21e46f42fdd21f705f9413a892586e3acb65eb2 done
+#47 naming to docker.io/library/qwen38-flash-dgx:issue60-candidate done
+#47 DONE 0.2s

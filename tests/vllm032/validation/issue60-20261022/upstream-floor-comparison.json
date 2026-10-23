@@ -1,0 +1,17 @@
+{
+  "scope": "Small installed-constructor fixtures explaining the numerical-preserving adaptation; no model inference.",
+  "cases": {
+    "target-yarn": {
+      "baseline_rows": 4096,
+      "proposed_floor_rows": 8000,
+      "frequencies_equal": false,
+      "first_rows_equal": false
+    },
+    "draft-default": {
+      "baseline_rows": 262144,
+      "proposed_floor_rows": 500000,
+      "frequencies_equal": true,
+      "first_rows_equal": true
+    }
+  }
+}

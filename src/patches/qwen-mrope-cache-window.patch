@@ -1,0 +1,45 @@
+--- a/vllm/model_executor/layers/rotary_embedding/mrope.py
++++ b/vllm/model_executor/layers/rotary_embedding/mrope.py
+@@ -370,8 +370,40 @@
+ 
+     def _compute_cos_sin_cache(self) -> torch.Tensor:
+         if self.scaling_factor is None:
+-            return super()._compute_cos_sin_cache()
+-        return YaRNScalingRotaryEmbedding._compute_cos_sin_cache(self)
++            cache = super()._compute_cos_sin_cache()
++        else:
++            cache = YaRNScalingRotaryEmbedding._compute_cos_sin_cache(self)
++
++        # vllm#62409: a drafter consumes the target's served positions. Cover
++        # that window without changing max_position_embeddings: YaRN uses
++        # the original base to compute its frequencies and correction range.
++        from vllm.config import get_current_vllm_config_or_none
++
++        config = get_current_vllm_config_or_none()
++        if config is None:
++            return cache
++        spec = config.speculative_config
++        model_config = (spec and spec.target_model_config) or config.model_config
++        if model_config is None:
++            return cache
++        served_window = int(model_config.max_model_len or 0)
++        self.cache_max_position_num = max(self.cache_max_position_num, served_window)
++        if cache.shape[0] >= served_window:
++            return cache
++
++        # Retain every existing row exactly, and append only missing positions.
++        # In particular, do not shrink multimodal or already-scaled headroom.
++        inv_freq = self._compute_inv_freq(
++            self.base if self.scaling_factor is None else self.scaling_factor
++        ).to(cache.device)
++        positions = torch.arange(
++            cache.shape[0], served_window, dtype=torch.float32, device=cache.device
++        )
++        freqs = torch.einsum("i,j -> ij", positions, inv_freq)
++        cos, sin = freqs.cos(), freqs.sin()
++        if self.scaling_factor is not None:
++            cos, sin = cos * self.mscale, sin * self.mscale
++        return torch.cat((cache, torch.cat((cos, sin), dim=-1)), dim=0)
+ 
+     def forward_native(
+         self,

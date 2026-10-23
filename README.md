@@ -79,10 +79,34 @@ speedup. Performance and tournament figures elsewhere in this README remain
 historical unless explicitly labeled v0.32; the full tournament has not been
 rerun for this release.
 
+### Long-context MTP crash fix (issue #60)
+
+New builds include patch 22 for the v0.32 M-RoPE cache sizing regression reported
+by [@FinSnow](https://github.com/FinSnow) in
+[#60](https://github.com/blazux/qwen3.8-Flash-DGX/issues/60). The MTP drafter's
+cos/sin table could stop at **262,144 positions** while the server accepted
+YaRN-scaled prompts up to 500k, allowing an out-of-bounds read and an EngineCore
+crash during generation. Patch 22 extends the cache to cover the served target
+window in both paths, preserving existing table rows and the YaRN frequency base.
+It is adapted from [@wtogami](https://github.com/wtogami)'s
+[vLLM #62409](https://github.com/vllm-project/vllm/pull/62409).
+
+Existing v0.32 installations need an explicit rebuild and container recreation:
+
+```bash
+docker build -t qwen38-flash-dgx:v0.32 .
+# Recreate the server with your usual profile and overrides.
+```
+
+`./flash setup` reuses an existing image with the current base label. For an
+unpatched image, disabling MTP (`MTP=0`) or using the native-context profile are
+the reported workarounds. See [reproduction and validation](docs/VLLM-032.md#long-context-mtp-cache-fix-issue-60).
+
 ## Recent changes
 
 | Date | Change |
 |---|---|
+| 2026-10-22 | **Long-context MTP crash:** patch 22 extends M-RoPE caches past the native 262k boundary for YaRN serving, preserving the original frequency calculations. Thanks to **[@FinSnow](https://github.com/FinSnow)** for [#60](https://github.com/blazux/qwen3.8-Flash-DGX/issues/60) and **[@wtogami](https://github.com/wtogami)** for the [upstream fix](https://github.com/vllm-project/vllm/pull/62409). [Details](#long-context-mtp-crash-fix-issue-60). |
 | 2026-10-22 | **Official vLLM v0.32 base:** requested by **[@neo42man](https://github.com/neo42man)** ([#58](https://github.com/blazux/qwen3.8-Flash-DGX/issues/58)), with an independent patch audit by **[@rp-tn](https://github.com/rp-tn)** ([#59](https://github.com/blazux/qwen3.8-Flash-DGX/issues/59)). Preserves hybrid QSA scale layout, mmap PLE, tool parsing and Responses fixes. [Upgrade and validation](docs/VLLM-032.md). |
 | 2026-10-20 | **Schema-validated tool arguments:** patch 21 ports **[@Chaos2522](https://github.com/Chaos2522)**'s repair for accidental `arguments` wrappers to v0.31, preserving valid payloads and Chat compatibility ([#31](https://github.com/blazux/qwen3.8-Flash-DGX/issues/31#issuecomment-6291191080)). [Behavior and validation](#schema-validated-tool-arguments-issue-31). |
 | 2026-10-19 | **MTP + routed-expert output:** patch 20 clears auxiliary outputs only on the MTP draft config, fixing the inherited-config error. Thanks to **[@rp-tn](https://github.com/rp-tn)** for the diagnosis and patch ([#55](https://github.com/blazux/qwen3.8-Flash-DGX/issues/55)); [details and test scope](#routed-expert-output-with-mtp-issue-55). |
@@ -1152,6 +1176,7 @@ src/patches/qwen-tool-preamble*.patch / qwen-tool-marker-guard*.patch
 src/patches/qwen-safe-output.patch 19. Qwen token identity, empty STOP failures and Responses terminal events
 src/patches/qwen-mtp-aux-output.patch 20. keep target auxiliary outputs out of the MTP draft config
 src/patches/qwen-tool-argument-schema.patch 21. schema-validated repair of accidental arguments wrappers
+src/patches/qwen-mrope-cache-window.patch 22. cover the served target window in M-RoPE caches, including MTP
 src/patch_load_pread.py          15. pread checkpoint tensors <= 64 MiB instead of mmap views     VLLM_LOAD_PREAD=0 disables
                                      (never the PLE table; needs 14)
 src/patch_moe_name_index.py      16. retired local expert-name index; v0.31 uses native upstream support
@@ -1227,6 +1252,7 @@ docker run --rm -v "$PWD/src:/t" -w /t --entrypoint python3 qwen38-flash-dgx:v0.
 - Qwen token-identity and Responses output-integrity fixes (patch 19), and schema-validated tool-argument repair (patch 21), with source bundles and regression fixtures: **[@Chaos2522](https://github.com/Chaos2522)** ([original fixes](https://github.com/blazux/qwen3.8-Flash-DGX/issues/31#issuecomment-6191209070), [schema repair](https://github.com/blazux/qwen3.8-Flash-DGX/issues/31#issuecomment-6291191080)); adapted here for vLLM v0.31. Thank you for the detailed reproductions and follow-up work.
 - MTP/routed-expert draft-config diagnosis and patch (patch 20): **[@rp-tn](https://github.com/rp-tn)** ([issue #55](https://github.com/blazux/qwen3.8-Flash-DGX/issues/55)) — thank you for sharing the fix.
 - Chat tool-name compatibility regression report: **[@FinSnow](https://github.com/FinSnow)** ([issue #56](https://github.com/blazux/qwen3.8-Flash-DGX/issues/56)).
+- Long-context MTP crash report: **[@FinSnow](https://github.com/FinSnow)** ([issue #60](https://github.com/blazux/qwen3.8-Flash-DGX/issues/60)); M-RoPE served-window fix: **[@wtogami](https://github.com/wtogami)** ([vllm#62409](https://github.com/vllm-project/vllm/pull/62409)), adapted as patch 22 to preserve the existing YaRN frequency base and cache rows.
 - CPU pinning, BF16 recurrent-state control, the `concurrent` profile and benchmark suite: **[@aphex3k](https://github.com/aphex3k)** ([PR #54](https://github.com/blazux/qwen3.8-Flash-DGX/pull/54)).
 - The vLLM v0.31 port and contributed GB10 measurements: **[@mercant1982](https://github.com/mercant1982)** ([PR #49](https://github.com/blazux/qwen3.8-Flash-DGX/pull/49)).
 - The nudge to port the recipe to the vLLM releases (v0.29, then v0.30): **[@ChengYen-Tang](https://github.com/ChengYen-Tang)** (issue #14).

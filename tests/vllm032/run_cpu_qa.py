@@ -24,6 +24,7 @@ def main():
         "hybrid-dispatch": ["vllm032/test_hybrid_dispatch.py"],
         "ple-constructor": ["vllm032/test_ple_constructor.py"],
         "responses": ["vllm032/test_responses.py"],
+        "mrope-window": ["vllm032/test_mrope_window.py"],
     }
     if args.output_dir:
         args.output_dir.mkdir(parents=True, exist_ok=True)

@@ -1,0 +1,52 @@
+W1023 00:46:29.633000 24 torch/utils/cpp_extension.py:178] No CUDA runtime is found, using CUDA_HOME='/usr/local/cuda'
+{
+  "model_inference": false,
+  "source_overlay": false,
+  "groups": {
+    "parser": {
+      "methods": 16,
+      "passed": true,
+      "failures": 0,
+      "errors": 0
+    },
+    "responses_sse": {
+      "methods": 11,
+      "passed": true,
+      "failures": 0,
+      "errors": 0
+    },
+    "actual_parser_manager": {
+      "methods": 12,
+      "passed": true,
+      "failures": 0,
+      "errors": 0
+    },
+    "reasoning_eof": {
+      "methods": 15,
+      "passed": true,
+      "failures": 0,
+      "errors": 0
+    },
+    "empty_stop": {
+      "methods": 5,
+      "passed": true,
+      "failures": 0,
+      "errors": 0
+    },
+    "actual_length_terminal_producer": {
+      "methods": 8,
+      "passed": true,
+      "failures": 0,
+      "errors": 0
+    }
+  },
+  "total_methods": 67,
+  "fidelity": {
+    "literal_byte_fidelity_cases": 21,
+    "stream_final_mismatches": 0,
+    "chunk_mismatches": 0,
+    "ordinary_bpe_protocol_ids_absent": true,
+    "normal_final_answer_passed": true
+  },
+  "passed": true
+}

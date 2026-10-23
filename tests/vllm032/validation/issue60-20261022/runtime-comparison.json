@@ -1,0 +1,12 @@
+{
+  "files_compared": 2883,
+  "different_files": [
+    "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/rotary_embedding/mrope.py"
+  ],
+  "baseline": {
+    "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/rotary_embedding/mrope.py": "922e8ba623e959e428ef103ba268be17b52bfafb8c5faa640cff8a8f42fc9a15"
+  },
+  "candidate": {
+    "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/rotary_embedding/mrope.py": "5c7b81d1b6c7db21b2683154d9e37e6556b02e4982a507d7232b7e69fca7eb93"
+  }
+}

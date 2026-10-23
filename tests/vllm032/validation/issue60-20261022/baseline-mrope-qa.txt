@@ -1,0 +1,56 @@
+W1023 00:35:48.968000 1 torch/utils/cpp_extension.py:178] No CUDA runtime is found, using CUDA_HOME='/usr/local/cuda'
+test_already_scaled_cache_is_unchanged (__main__.MRoPEWindow.test_already_scaled_cache_is_unchanged) ... ok
+test_bfloat16_cache_keeps_exact_old_rows (__main__.MRoPEWindow.test_bfloat16_cache_keeps_exact_old_rows) ... ok
+test_drafter_uses_target_window_instead_of_own_native_limit (__main__.MRoPEWindow.test_drafter_uses_target_window_instead_of_own_native_limit) ... FAIL
+test_factory_covers_yarn_target_and_default_mtp_drafter (__main__.MRoPEWindow.test_factory_covers_yarn_target_and_default_mtp_drafter) ... FAIL
+test_growing_yarn_cache_preserves_base_frequencies_and_existing_rows (__main__.MRoPEWindow.test_growing_yarn_cache_preserves_base_frequencies_and_existing_rows) ... FAIL
+test_multimodal_headroom_is_not_shrunk (__main__.MRoPEWindow.test_multimodal_headroom_is_not_shrunk) ... ok
+test_native_window_is_bit_identical (__main__.MRoPEWindow.test_native_window_is_bit_identical) ... ok
+test_no_engine_context_preserves_direct_constructor_behavior (__main__.MRoPEWindow.test_no_engine_context_preserves_direct_constructor_behavior) ... ok
+test_real_native_boundary_and_last_served_position_are_addressable (__main__.MRoPEWindow.test_real_native_boundary_and_last_served_position_are_addressable) ... FAIL
+test_served_window_is_per_constructor (__main__.MRoPEWindow.test_served_window_is_per_constructor) ... FAIL
+
+======================================================================
+FAIL: test_drafter_uses_target_window_instead_of_own_native_limit (__main__.MRoPEWindow.test_drafter_uses_target_window_instead_of_own_native_limit)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tests/vllm032/test_mrope_window.py", line 60, in test_drafter_uses_target_window_instead_of_own_native_limit
+    self.assertGreaterEqual(rope.cos_sin_cache.shape[0], 500000)
+AssertionError: 262144 not greater than or equal to 500000
+
+======================================================================
+FAIL: test_factory_covers_yarn_target_and_default_mtp_drafter (__main__.MRoPEWindow.test_factory_covers_yarn_target_and_default_mtp_drafter)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tests/vllm032/test_mrope_window.py", line 115, in test_factory_covers_yarn_target_and_default_mtp_drafter
+    self.assertGreaterEqual(draft.cos_sin_cache.shape[0], 500000)
+AssertionError: 262144 not greater than or equal to 500000
+
+======================================================================
+FAIL: test_growing_yarn_cache_preserves_base_frequencies_and_existing_rows (__main__.MRoPEWindow.test_growing_yarn_cache_preserves_base_frequencies_and_existing_rows)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tests/vllm032/test_mrope_window.py", line 74, in test_growing_yarn_cache_preserves_base_frequencies_and_existing_rows
+    self.assertEqual(rope.cos_sin_cache.shape[0], 10000)
+AssertionError: 2048 != 10000
+
+======================================================================
+FAIL: test_real_native_boundary_and_last_served_position_are_addressable (__main__.MRoPEWindow.test_real_native_boundary_and_last_served_position_are_addressable)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tests/vllm032/test_mrope_window.py", line 52, in test_real_native_boundary_and_last_served_position_are_addressable
+    self.assertGreaterEqual(rope.cos_sin_cache.shape[0], 500000)
+AssertionError: 262144 not greater than or equal to 500000
+
+======================================================================
+FAIL: test_served_window_is_per_constructor (__main__.MRoPEWindow.test_served_window_is_per_constructor)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tests/vllm032/test_mrope_window.py", line 131, in test_served_window_is_per_constructor
+    self.assertEqual(extended.cos_sin_cache.shape[0], 4096)
+AssertionError: 1024 != 4096
+
+----------------------------------------------------------------------
+Ran 10 tests in 0.113s
+
+FAILED (failures=5)
