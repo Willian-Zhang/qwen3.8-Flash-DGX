@@ -1,0 +1,16 @@
+W1023 00:49:49.504000 105 torch/utils/cpp_extension.py:178] No CUDA runtime is found, using CUDA_HOME='/usr/local/cuda'
+test_already_scaled_cache_is_unchanged (__main__.MRoPEWindow.test_already_scaled_cache_is_unchanged) ... ok
+test_bfloat16_cache_keeps_exact_old_rows (__main__.MRoPEWindow.test_bfloat16_cache_keeps_exact_old_rows) ... ok
+test_drafter_uses_target_window_instead_of_own_native_limit (__main__.MRoPEWindow.test_drafter_uses_target_window_instead_of_own_native_limit) ... ok
+test_factory_covers_yarn_target_and_default_mtp_drafter (__main__.MRoPEWindow.test_factory_covers_yarn_target_and_default_mtp_drafter) ... ok
+test_growing_yarn_cache_preserves_base_frequencies_and_existing_rows (__main__.MRoPEWindow.test_growing_yarn_cache_preserves_base_frequencies_and_existing_rows) ... ok
+test_multimodal_headroom_is_not_shrunk (__main__.MRoPEWindow.test_multimodal_headroom_is_not_shrunk) ... ok
+test_native_window_is_bit_identical (__main__.MRoPEWindow.test_native_window_is_bit_identical) ... ok
+test_no_engine_context_preserves_direct_constructor_behavior (__main__.MRoPEWindow.test_no_engine_context_preserves_direct_constructor_behavior) ... ok
+test_real_native_boundary_and_last_served_position_are_addressable (__main__.MRoPEWindow.test_real_native_boundary_and_last_served_position_are_addressable) ... ok
+test_served_window_is_per_constructor (__main__.MRoPEWindow.test_served_window_is_per_constructor) ... ok
+
+----------------------------------------------------------------------
+Ran 10 tests in 0.161s
+
+OK

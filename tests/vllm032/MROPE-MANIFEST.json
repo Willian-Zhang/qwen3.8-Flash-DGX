@@ -1,0 +1,22 @@
+{
+  "issue": "https://github.com/blazux/qwen3.8-Flash-DGX/issues/60",
+  "patch": 22,
+  "vllm_version": "0.32.0",
+  "upstream_pr": "https://github.com/vllm-project/vllm/pull/62409",
+  "upstream_author": "wtogami",
+  "upstream_head_sha": "892a8c6fe650ec76a53fa2ff26c9e67b3d6a9f07",
+  "upstream_status_at_port": "open",
+  "file": {
+    "path": "vllm/model_executor/layers/rotary_embedding/mrope.py",
+    "base_sha256": "922e8ba623e959e428ef103ba268be17b52bfafb8c5faa640cff8a8f42fc9a15",
+    "target_sha256": "5c7b81d1b6c7db21b2683154d9e37e6556b02e4982a507d7232b7e69fca7eb93"
+  },
+  "adaptations": [
+    "Use the served target window for both target and MTP draft caches.",
+    "Keep the original max_position_embeddings used by YaRN frequency and correction-range calculations.",
+    "Append only missing cos/sin rows, preserving every original row and existing scaled/multimodal headroom.",
+    "Use the optional current-config getter for direct constructor contexts without catching unrelated exceptions."
+  ],
+  "baseline_image_id": "sha256:6a05cafe0c8025c8ac6e3dfe9931c67d550aedc3d6cf9f58f76f27aa3cc6fc2e",
+  "candidate_image_id": "sha256:949814a496df738fd60f3f1fc21e46f42fdd21f705f9413a892586e3acb65eb2"
+}

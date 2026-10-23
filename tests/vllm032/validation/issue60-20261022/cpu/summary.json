@@ -1,0 +1,30 @@
+{
+  "model_inference": false,
+  "suites": {
+    "schema": {
+      "exit_code": 0
+    },
+    "safe-output": {
+      "exit_code": 0
+    },
+    "mtp-aux": {
+      "exit_code": 0
+    },
+    "hybrid-qsa": {
+      "exit_code": 0
+    },
+    "hybrid-dispatch": {
+      "exit_code": 0
+    },
+    "ple-constructor": {
+      "exit_code": 0
+    },
+    "responses": {
+      "exit_code": 0
+    },
+    "mrope-window": {
+      "exit_code": 0
+    }
+  },
+  "no_unexpected_failures": true
+}

@@ -206,6 +206,78 @@ All patch commands retain `--fuzz=0`; relaxing patch context is not the fix.
 Applying patches alone does not exercise the PLE constructor or the hybrid QSA
 weight loader. The CPU and GPU checks above cover those additional contracts.
 
+## Long-context MTP cache fix (issue #60)
+
+[@FinSnow's report](https://github.com/blazux/qwen3.8-Flash-DGX/issues/60)
+describes an EngineCore crash when a YaRN prompt crosses the native 262,144-token
+boundary with MTP enabled. The matching upstream regression is
+[vllm#62383](https://github.com/vllm-project/vllm/issues/62383): the default M-RoPE
+cache can retain the native length even though the engine serves a larger window.
+The MTP/CUDA-graph path can then index beyond the allocated table. Merely setting
+the drafter's `max_model_len` does not resize this table.
+
+Patch 22 adapts [@wtogami's proposed fix](https://github.com/vllm-project/vllm/pull/62409)
+at head `892a8c6fe650ec76a53fa2ff26c9e67b3d6a9f07`. The cache follows the target's
+served window, including when it is constructed for an MTP drafter. The backport
+keeps `max_position_embeddings` unchanged: in this base, YaRN uses that value in
+its frequency and correction-range calculations. Raising it before the original
+constructor changes existing rows as well as cache capacity. Instead, the port
+computes the original table, retains every row, and appends only missing positions
+using the same frequencies and magnitude scale. Existing scaled and multimodal
+headroom is preserved. No weights, sampling, profile, RoPE scaling parameters or
+MTP width are changed.
+
+The complete image builds with `--fuzz=0`. The new installed-code CPU suite gives
+**10/10 passing methods**, compared with **5 failures on the unpatched reference**.
+It checks both the actual 262k/500k bounds and the constructor/factory contracts,
+including the target's window overriding the drafter's own native limit. Native
+rows, BF16 rows, scaled rows and multimodal headroom are checked for exact
+preservation. A runtime comparison covers 2,883 Python/source-extension files;
+only `mrope.py` differs. This comparison does not assert complete image/dependency
+identity.
+
+The [boundary probe](../tests/vllm032/probe_mrope_boundary.py) makes real model
+requests and can crash an unfixed engine; use a separately started test instance.
+It tests approximately 260k, 263k, 336k and 499k input tokens, with fresh and
+prefix-cached requests, exact retrieval, health checks and subsequent short
+generations. It saves partial reports when a request fails. No proposed tools
+are executed. Provenance and source hashes are recorded in
+[`MROPE-MANIFEST.json`](../tests/vllm032/MROPE-MANIFEST.json).
+
+GPU validation on GX10 uses the existing NVIDIA hybrid checkpoint, MTP=2,
+YaRN 500k, FP8 KV fixed at 8 GiB, 16 sequence slots, BF16 recurrent state and
+PIECEWISE graphs. Both arms use identical long-request payloads and package
+versions (Torch 2.13.0+cu130, Triton 3.7.1, vLLM 0.32.0). The observed target
+cache stays at **1,048,576 rows**; the draft cache grows from **262,144 to 500,000**.
+A constructor logging wrapper is applied equally to the two test arms; it returns
+the installed computation unchanged and is absent from the production rollout.
+
+| Actual input tokens | Unpatched reference | Patch 22 |
+| --- | --- | --- |
+| 259,995 | Cold + replay pass | Cold + replay pass |
+| 262,998 | Cold + replay pass | Cold + replay pass |
+| 335,994 | Cold + replay pass | Cold + replay pass |
+| 498,988 | Cold + replay pass | Cold + replay pass |
+
+All eight long requests in each arm return the exact retrieved code. Replay
+reuses more than 90% of the prefix, and each long request is followed by a
+successful health check and short generation. **The reference did not reproduce
+the reported EngineCore crash on this workload.** The undersized draft cache is
+reproduced in CPU tests and observed in real model construction; patch 22 fixes
+that capacity defect. Confirmation on the reporter's exact failing workload is
+still useful. A separate MTP-off GPU control was not run because the reference
+stayed healthy. These results establish no general long-context quality or speed
+improvement.
+
+The full eight-suite CPU rerun has no unexpected failures; the existing author's
+dotted-namespace case remains the known schema failure. Raw CPU/GPU reports,
+settings, source comparison and limitations are recorded in
+[`validation/issue60-20261022/`](../tests/vllm032/validation/issue60-20261022/VALIDATION.json).
+
+Existing v0.32 installations must rebuild the image explicitly and recreate the
+container with the usual profile and overrides. `./flash setup` reuses a matching
+base label and does not install source-only fixes into an existing image.
+
 ## Validation limits and rollback
 
 This is a compatibility and maintenance update. These measurements establish no

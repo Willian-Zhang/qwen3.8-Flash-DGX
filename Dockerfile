@@ -3,7 +3,8 @@
 #   8 deterministic top-k kernel, 10 reduced draft vocabulary, 12 Qwen tool preamble fix,
 #   13 quoted Qwen tool markers stay text, 14 MoE weight-load clone (#33), 15-18 the rest of weight
 #   loading (pread, chunked embedding copy, MTP name prefilter), 19 token identity and Responses output,
-#   20 isolate the MTP drafter from target auxiliary outputs, 21 schema-validated tool arguments.
+#   20 isolate the MTP drafter from target auxiliary outputs, 21 schema-validated tool arguments,
+#   22 cover the served M-RoPE window in the target and MTP drafter.
 # Upstream now: 3 (vllm#50729), 7 (vllm#55557), 9 (vllm#52775),
 # 11 (vllm#55513), 16 (vllm#58720). Older bases remain in git history.
 #
@@ -130,3 +131,10 @@ COPY src/patches/qwen-tool-argument-schema.patch /tmp/qwen-tool-argument-schema.
 RUN cd ${SP} && patch --batch --forward --fuzz=0 -p1 < /tmp/qwen-tool-argument-schema.patch \
  && python3 -c "import ast, jsonschema, referencing; ast.parse(open('${SP}/vllm/parser/engine/argument_validation.py').read())" \
  && rm /tmp/qwen-tool-argument-schema.patch
+
+# --- 22. M-RoPE cache covers served positions, including the MTP draft path (issue #60) ---
+# Adapted from wtogami's vllm#62409; preserve the original YaRN frequency base and cache rows.
+COPY src/patches/qwen-mrope-cache-window.patch /tmp/qwen-mrope-cache-window.patch
+RUN cd ${SP} && patch --batch --forward --fuzz=0 -p1 < /tmp/qwen-mrope-cache-window.patch \
+ && python3 -c "import ast; ast.parse(open('${SP}/vllm/model_executor/layers/rotary_embedding/mrope.py').read())" \
+ && rm /tmp/qwen-mrope-cache-window.patch

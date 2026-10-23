@@ -1,0 +1,172 @@
+{
+  "date_local": "2026-10-22",
+  "completed_utc": "2026-10-23T01:12:08.570668+00:00",
+  "issue": "https://github.com/blazux/qwen3.8-Flash-DGX/issues/60",
+  "baseline_image_id": "sha256:6a05cafe0c8025c8ac6e3dfe9931c67d550aedc3d6cf9f58f76f27aa3cc6fc2e",
+  "candidate_image_id": "sha256:949814a496df738fd60f3f1fc21e46f42fdd21f705f9413a892586e3acb65eb2",
+  "cpu": {
+    "mrope_methods": 10,
+    "candidate_passed": 10,
+    "baseline_failed_methods": 5,
+    "full_suites": {
+      "schema": {
+        "exit_code": 0
+      },
+      "safe-output": {
+        "exit_code": 0
+      },
+      "mtp-aux": {
+        "exit_code": 0
+      },
+      "hybrid-qsa": {
+        "exit_code": 0
+      },
+      "hybrid-dispatch": {
+        "exit_code": 0
+      },
+      "ple-constructor": {
+        "exit_code": 0
+      },
+      "responses": {
+        "exit_code": 0
+      },
+      "mrope-window": {
+        "exit_code": 0
+      }
+    },
+    "no_unexpected_failures": true,
+    "known_failure": "The previous author-schema dotted namespace case remains the only expected schema failure."
+  },
+  "runtime_comparison": {
+    "files_compared": 2883,
+    "different_files": [
+      "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/rotary_embedding/mrope.py"
+    ],
+    "baseline": {
+      "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/rotary_embedding/mrope.py": "922e8ba623e959e428ef103ba268be17b52bfafb8c5faa640cff8a8f42fc9a15"
+    },
+    "candidate": {
+      "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/rotary_embedding/mrope.py": "5c7b81d1b6c7db21b2683154d9e37e6556b02e4982a507d7232b7e69fca7eb93"
+    }
+  },
+  "dependency_versions": {
+    "baseline": {
+      "torch": "2.13.0+cu130",
+      "triton": "3.7.1",
+      "vllm": "0.32.0",
+      "transformers": "5.19.0",
+      "flashinfer-python": "0.7.0.post1"
+    },
+    "candidate": {
+      "torch": "2.13.0+cu130",
+      "triton": "3.7.1",
+      "vllm": "0.32.0",
+      "transformers": "5.19.0",
+      "flashinfer-python": "0.7.0.post1"
+    },
+    "versions_match": true
+  },
+  "gpu": {
+    "baseline_all_passed": true,
+    "baseline_crash_reproduced": false,
+    "baseline_cuda_fault_in_logs": false,
+    "candidate_all_passed": true,
+    "long_requests_per_arm": 8,
+    "short_requests_per_arm": 8,
+    "same_long_request_payloads": true,
+    "constructor_tables": {
+      "baseline": [
+        {
+          "base": 262144,
+          "scaling_factor": 4.0,
+          "rows": 1048576,
+          "columns": 64,
+          "served": 500000,
+          "own_window": 500000
+        },
+        {
+          "base": 262144,
+          "scaling_factor": null,
+          "rows": 262144,
+          "columns": 64,
+          "served": 500000,
+          "own_window": 500000
+        }
+      ],
+      "candidate": [
+        {
+          "base": 262144,
+          "scaling_factor": 4.0,
+          "rows": 1048576,
+          "columns": 64,
+          "served": 500000,
+          "own_window": 500000
+        },
+        {
+          "base": 262144,
+          "scaling_factor": null,
+          "rows": 500000,
+          "columns": 64,
+          "served": 500000,
+          "own_window": 500000
+        }
+      ]
+    },
+    "actual_input_tokens": [
+      259995,
+      262998,
+      335994,
+      498988
+    ],
+    "mtp_off_control_run": false
+  },
+  "probe_sha256": "596ad2c94bec268693210683690ed2c7fa2a4c8e8b531110e03099784bd1d273",
+  "settings": {
+    "hardware": "NVIDIA GB10 / ASUS GX10, ARM64",
+    "model": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+    "checkpoint_revision": "fc694b54fb0174e0913e6adf86691ef85a4ead47",
+    "checkpoint_layout": "fp8hybrid",
+    "max_model_len": 500000,
+    "speculative_config": {
+      "method": "mtp",
+      "num_speculative_tokens": 2,
+      "max_model_len": 500000
+    },
+    "hf_overrides": {
+      "text_config": {
+        "rope_parameters": {
+          "mrope_interleaved": true,
+          "mrope_section": [
+            11,
+            11,
+            10
+          ],
+          "rope_type": "yarn",
+          "rope_theta": 10000000,
+          "partial_rotary_factor": 0.25,
+          "factor": 4.0,
+          "original_max_position_embeddings": 262144
+        }
+      }
+    },
+    "max_num_seqs": 16,
+    "kv_dtype": "fp8_e4m3",
+    "kv_bytes": 8589934592,
+    "mamba_ssm_dtype": "bfloat16",
+    "max_num_batched_tokens": 8192,
+    "gpu_memory_utilization": 0.8,
+    "cpuset": "5-9,15-19",
+    "graphs": "PIECEWISE",
+    "prefix_cache": true,
+    "temperature": 0,
+    "max_output_tokens": 256,
+    "reasoning_effort": "low"
+  },
+  "instrumentation": "Both GPU test arms use the same constructor logging wrapper. It records and returns the installed computation unchanged. The production rollout does not use this wrapper.",
+  "limits": [
+    "The unpatched reference did not crash in this workload on this GX10; the undersized MTP cache is reproduced in CPU tests and observed in real engine construction.",
+    "This is a targeted cache-capacity fix, not proof that every reported EngineCore crash shares that cause. Reporter confirmation after rebuilding remains useful.",
+    "One retrieval fixture at four lengths with cold and cached replay; no general long-context quality, throughput improvement or complete tournament claim.",
+    "MTP-off control is conditional on reproducing the baseline engine failure; it was not needed when the reference stayed healthy."
+  ]
+}

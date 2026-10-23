@@ -11,6 +11,9 @@ interfaces that patch application alone does not exercise.
 The schema runner accepts `--manifest` so the v0.31 provenance stays intact.
 The other suites check the mmap constructor, blockwise-FP8 QSA dispatch,
 MTP auxiliary outputs, native Responses event names and final item IDs.
+Patch 22 adds ten installed-code M-RoPE constructor/factory tests for served-window
+coverage and bit-exact preservation of existing rows. Its provenance and source
+hashes are recorded separately in `MROPE-MANIFEST.json`.
 
 Build the recipe and run the installed-code CPU checks on the supported ARM64
 host. Mount only `tests/`, not the repository's `src/`, so the compatibility
@@ -43,3 +46,26 @@ remain in `validation/VALIDATION.json`; this CPU rerun did not generate tokens.
 The live probes require a separately started candidate. They generate tokens
 but do not execute proposed tools. A synthetic long-context retrieval and
 protocol checks do not establish agentic tournament quality.
+
+For issue #60, use an isolated candidate: an unpatched engine can crash during
+this probe. The script calibrates actual input tokens through `/tokenize`, runs
+cold and replay requests across the native boundary, checks the retrieved code,
+requires prefix reuse on replay, and follows each long request with health and a
+short generation. JSON evidence is saved after each step, including failures.
+
+```bash
+python3 tests/vllm032/probe_mrope_boundary.py \
+  --base-url http://127.0.0.1:18360 \
+  --sizes 260000,263000,336000,499000 --repeats 2 \
+  --output /tmp/mrope-boundary.json
+```
+
+The CPU regression is `/tests/vllm032/test_mrope_window.py` with the same image
+and tests mount as the runner above; no tokenizer is needed for that test alone.
+
+The patch-22 validation is recorded in
+[`validation/issue60-20261022/VALIDATION.json`](validation/issue60-20261022/VALIDATION.json).
+It includes the eight-suite CPU rerun and four cold/replay GPU retrievals per
+arm. The unpatched reference did not crash on those requests; its draft cache
+was nevertheless observed to have only 262,144 rows for a 500k served window.
+The corrected cache has 500,000 rows, with the original YaRN base preserved.
