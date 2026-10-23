@@ -305,8 +305,8 @@ cmd_wait() {
       echo "  API: http://localhost:$PORT/v1  (model '$MODEL_NAME')   try: ./flash test"
       return 0
     fi
-    local l; l="$(docker logs --tail 40 "$NAME" 2>&1 | grep -E 'Loading safetensors|Loading weights took|Model loading took|torch.compile took|Capturing CUDA|KV cache size|prewarm|startup' | tail -1 | cut -c1-90 || true)"
-    [ "$l" != "$last" ] && { printf '\r%-100s' "  $(( $(date +%s) - t0 ))s  ${l#*] }"; last="$l"; }
+    local l e; l="$(docker logs --tail 40 "$NAME" 2>&1 | grep -E 'Loading safetensors|Loading weights took|Model loading took|torch.compile took|Capturing CUDA|KV cache size|prewarm|startup' | tail -1 | sed -E 's/.*\] //; s/^Model loading took ([0-9.]+ [KMGT]iB)( memory)? and ([0-9]+)(\.[0-9]+)? seconds[[:space:]]*$/\1 model loading took \3s/' | cut -c1-92 || true)"
+    [ "$l" != "$last" ] && { e=""; case "$l" in [0-9]*) ;; *) e="$(( $(date +%s) - t0 ))s  " ;; esac; printf '\r%-100s' "  ${e}${l}"; last="$l"; }
     [ "$(date +%s)" -lt "$deadline" ] || { echo; die "still not up after ${TIMEOUT:-1800}s — check: ./flash logs"; }
     sleep 5
   done
