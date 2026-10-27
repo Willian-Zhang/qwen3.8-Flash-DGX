@@ -317,7 +317,7 @@ one wins; anything below it stays an option.
 | Prefix caching (`PREFIX_CACHE=1`) | **on** | ~14 s → ~1.4 s TTFT on a repeated 20k prefix |
 | `MTP=3` | option (`MTP=2` default) | +7% decode, −1 point at the tournament (44 vs 45/51) |
 | NVFP4 MTP draft experts (`MODE=hybrid-mtp`) | option | +22% KV pool, −3.9 GiB weights, decode unchanged here, tournament neutral (44/51) |
-| DFlash2 draft model (`DRAFT_MODEL`) | option (`dflash` profile) | replaces the MTP head with a 0.6B block-diffusion drafter (0.6B extra weights to load, `DRAFT_TOKENS=7` default); needs the target's full vocabulary, so the reduced-draft-vocab prune is off here; new upstream vLLM feature, validated by incoai on GB300/TP1 — **not measured on this GX10 recipe** |
+| DFlash2 draft model (`DRAFT_MODEL`) | option (`dflash` profile) | **blocked on vLLM 0.32.0 as measured here (2026-10-27)**: the draft loads and resolves, but the engine's Qwen4Exp guard admits only MTP/ngram drafters — [vllm#56088](https://github.com/vllm-project/vllm/issues/56088), public patch recipe [PixelML/deepspec-qwen38-flash-next](https://github.com/PixelML/deepspec-qwen38-flash-next/tree/main/serving) |
 | fp8 KV cache (`KV_DTYPE=fp8_e4m3`) | option | ×1.9 KV pool, 1M context. −4% decode, −3 to −17% prefill, tournament 88.4% (3 runs, 500k context) vs 87.8% in bf16 (3 runs); prefix-cache blocks twice as coarse |
 | Exact `torch.topk` (`EXACT_TOPK=1`) | fallback | deterministic like the kernel, −20–40% long prefill |
 | Persistent compile cache (`COMPILE_CACHE`) | option | −37 s of startup per boot after the first (init engine −26 s); startup only, outputs and tournament unaffected |
@@ -351,7 +351,7 @@ Profiles (`profiles/*.env`, each a handful of `serve.sh` variables; copy one to 
 |---|---|---|
 | `default` | hybrid, YaRN 500k, deterministic top-k, reduced draft vocabulary, prefix caching, MTP=2 | the recommended one: best tournament score (45/51) |
 | `speed` | default + `MTP=3` | +7% decode for about one tournament point |
-| `dflash` | default + the DFlash2 draft model (incoai, 0.6B) instead of the MTP head (`DRAFT_MODEL`, `MTP=0`) | block-diffusion drafting (7 draft tokens); a newer vLLM path than MTP — provider-validated on GB300/TP1, not measured here yet; needs the one-time ~1.2 GiB draft download (handled by `./flash setup dflash`) |
+| `dflash` | default + the DFlash2 draft model (incoai, 0.6B) instead of the MTP head (`DRAFT_MODEL`, `MTP=0`) | **currently blocked**: vLLM 0.32.0's Qwen4Exp target accepts no drafter but MTP/ngram, so the boot stops at config ([vllm#56088](https://github.com/vllm-project/vllm/issues/56088), patches public — [recipe](https://github.com/PixelML/deepspec-qwen38-flash-next/tree/main/serving)); the profile exercises the whole draft plumbing for re-testing when it lands |
 | `concurrent` | default + `SEQS=16`, `MAMBA_SSM_DTYPE=bfloat16`; uses the default CPUSET `5-9,15-19` | higher aggregate throughput with parallel clients; [measured with FP8 KV and an 8 GiB pool](#measured-concurrent-profile-pr-54) |
 | `context` | `MODE=hybrid-mtp` (NVFP4 MTP draft experts) | +22% KV pool for concurrency or long contexts, decode unchanged |
 | `context-1m` | hybrid + `KV_DTYPE=fp8_e4m3`, 1M context | when you need 1M tokens in one request (small speed cost) |

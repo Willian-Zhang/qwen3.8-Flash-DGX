@@ -228,6 +228,10 @@ if [ "$YARN" != 0 ]; then OVR_ARGS=(--hf-overrides "$YARN_OVR"); ALLOW_LONG=1; f
 # against the target's hidden states (lossless, like MTP). It takes the same YaRN
 # max_model_len treatment as the MTP draft, and the draft snapshot is already on disk
 # under the HF cache mount, so no second mount or download at serve time.
+# STATUS 2026-10-27: the engine-side plumbing above works on this image, but vLLM 0.32's
+# Qwen4Exp guard admits only MTP/ngram drafters, so the boot stops at config time. Blocked
+# upstream by vllm-project/vllm#56088 (five blockers, public patch recipe at
+# github.com/PixelML/deepspec-qwen38-flash-next/tree/main/serving). Kept for re-testing.
 SPEC=()
 if [ -n "$DRAFT_MODEL" ]; then
   DRAFT_HOST=""
