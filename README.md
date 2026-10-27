@@ -317,7 +317,7 @@ one wins; anything below it stays an option.
 | Prefix caching (`PREFIX_CACHE=1`) | **on** | ~14 s → ~1.4 s TTFT on a repeated 20k prefix |
 | `MTP=3` | option (`MTP=2` default) | +7% decode, −1 point at the tournament (44 vs 45/51) |
 | NVFP4 MTP draft experts (`MODE=hybrid-mtp`) | option | +22% KV pool, −3.9 GiB weights, decode unchanged here, tournament neutral (44/51) |
-| DFlash2 draft model (`DRAFT_MODEL`) | option (`dflash` profile) | **blocked on vLLM 0.32.0 as measured here (2026-10-27)**: the draft loads and resolves, but the engine's Qwen4Exp guard admits only MTP/ngram drafters — [vllm#56088](https://github.com/vllm-project/vllm/issues/56088), public patch recipe [PixelML/deepspec-qwen38-flash-next](https://github.com/PixelML/deepspec-qwen38-flash-next/tree/main/serving) |
+| DFlash2 draft model (`DRAFT_MODEL`) | option (`dflash` profile) | the 0.6B block-diffusion drafter replaces the MTP head; the Qwen4Exp engine guards are opened in the image by patch 23 (allowlist + target aux capture + QSA ring, per [vllm#56088](https://github.com/vllm-project/vllm/issues/56088), recipe [PixelML/deepspec-qwen38-flash-next](https://github.com/PixelML/deepspec-qwen38-flash-next/tree/main/serving)) — **not benched; the MTP path is the measured one** |
 | fp8 KV cache (`KV_DTYPE=fp8_e4m3`) | option | ×1.9 KV pool, 1M context. −4% decode, −3 to −17% prefill, tournament 88.4% (3 runs, 500k context) vs 87.8% in bf16 (3 runs); prefix-cache blocks twice as coarse |
 | Exact `torch.topk` (`EXACT_TOPK=1`) | fallback | deterministic like the kernel, −20–40% long prefill |
 | Persistent compile cache (`COMPILE_CACHE`) | option | −37 s of startup per boot after the first (init engine −26 s); startup only, outputs and tournament unaffected |
@@ -1179,6 +1179,10 @@ src/patches/qwen-safe-output.patch 19. Qwen token identity, empty STOP failures 
 src/patches/qwen-mtp-aux-output.patch 20. keep target auxiliary outputs out of the MTP draft config
 src/patches/qwen-tool-argument-schema.patch 21. schema-validated repair of accidental arguments wrappers
 src/patches/qwen-mrope-cache-window.patch 22. cover the served target window in M-RoPE caches, including MTP
+src/patch_dflash_qwen4exp.py     23. dflash/DFlash2 seam on Qwen4Exp: speculative-method allowlist +
+                                     EAGLE-3-style target aux capture + QSA ring widening
+                                     (vllm#56088; ring port of vllm#54912) - see profiles/dflash.env
+src/test_dflash_patch_cpu.py        CPU unit test for patch 23 (anchors, idempotence, ring math)
 src/patch_load_pread.py          15. pread checkpoint tensors <= 64 MiB instead of mmap views     VLLM_LOAD_PREAD=0 disables
                                      (never the PLE table; needs 14)
 src/patch_moe_name_index.py      16. retired local expert-name index; v0.31 uses native upstream support
@@ -1207,7 +1211,7 @@ scripts/download-draft.sh         one-time: the DFlash2 draft model (DRAFT_MODEL
 scripts/prepare-hybrid.sh         one-time: build the -fp8hybrid snapshot
 scripts/prepare-mtp-graft.sh      one-time: graft the NVFP4 MTP draft experts onto it (MODE=hybrid-mtp, RadixArk only)
 tools/vllm_watch.py               live per-session view of prompts / reasoning / outputs / stats (needs LOG_REQUESTS=1; @0x3dlux)
-scripts/serve.sh                  MODE=nvfp4|hybrid|hybrid-mtp, SERVED_MODEL_NAME, PREFIX_CACHE, DET_TOPK, DRAFT_VOCAB, MADVISE, EXACT_TOPK, KV_DTYPE, YARN, ...
+scripts/serve.sh                  MODE=nvfp4|hybrid|hybrid-mtp, SERVED_MODEL_NAME, PREFIX_CACHE, DET_TOPK, DRAFT_VOCAB, DRAFT_MODEL, DRAFT_TOKENS, MADVISE, EXACT_TOPK, KV_DTYPE, YARN, ...
 scripts/smoke-test.sh             health, coherence, prefix-cache hit, determinism, tok/s
 scripts/greedy-probe.sh           greedy probe set; diff two arms to gate a draft/checkpoint swap
 scripts/run-humaneval.sh          HumanEval end-to-end: generate -> sandboxed execution -> report

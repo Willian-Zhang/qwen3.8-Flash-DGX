@@ -237,7 +237,7 @@ cmd_doctor() {
   fi
   if [ -n "${DRAFT_MODEL:-}" ]; then
     if have_draft; then ok "draft model present: $(draft_snapshot_dir)"; else info "draft model not downloaded yet (one-time, ~1.2 GiB: ./flash setup $profile or scripts/download-draft.sh)"; fi
-    info "dflash status on this target (2026-10-27 boot): the draft loads (DFlash2DraftModel resolves) but vLLM 0.32's Qwen4Exp guard admits only MTP/ngram drafters, so the engine stops at config. Blocked upstream by vllm-project/vllm#56088; public patch recipe: github.com/PixelML/deepspec-qwen38-flash-next/tree/main/serving. Fallback: ./flash serve default (MTP)."
+    info "dflash draft path is opened in the image by patch 23 (vllm#56088 seams: allowlist + target aux capture + QSA ring) - rebuild the image (docker build) after pulling, and note it is unbenched; the MTP default (./flash serve default) is the measured config"
   fi
   if [ -n "${HF_TOKEN:-}${HUGGING_FACE_HUB_TOKEN:-}" ]; then ok "HF token in the environment"; else info "no HF_TOKEN: downloads work but the Hub may rate-limit; export HF_TOKEN=... to be safe"; fi
 

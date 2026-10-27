@@ -228,12 +228,15 @@ if [ "$YARN" != 0 ]; then OVR_ARGS=(--hf-overrides "$YARN_OVR"); ALLOW_LONG=1; f
 # against the target's hidden states (lossless, like MTP). It takes the same YaRN
 # max_model_len treatment as the MTP draft, and the draft snapshot is already on disk
 # under the HF cache mount, so no second mount or download at serve time.
-# STATUS 2026-10-27: the engine-side plumbing above works on this image, but vLLM 0.32's
-# Qwen4Exp guard admits only MTP/ngram drafters, so the boot stops at config time. Blocked
-# upstream by vllm-project/vllm#56088 (five blockers, public patch recipe at
-# github.com/PixelML/deepspec-qwen38-flash-next/tree/main/serving). Kept for re-testing.
+# STATUS 2026-10-27: the guard is opened in the image by patch 23
+# (src/patch_dflash_qwen4exp.py: allowlist + target aux-hidden-state seam + QSA ring,
+# per vllm-project/vllm#56088, recipe PixelML/deepspec-qwen38-flash-next/serving).
+# dflash is V2-runner-only, so the V2 runner is pinned here; rebuild the image
+# (docker build) after pulling so patch 23 is present.
 SPEC=()
+DRAFT_ENV=()
 if [ -n "$DRAFT_MODEL" ]; then
+  DRAFT_ENV=(-e VLLM_USE_V2_MODEL_RUNNER=1)  # init_speculator: dflash is a V2-runner path
   DRAFT_HOST=""
   DRAFT_REPO_DIR="$HF_CACHE/hub/models--${DRAFT_MODEL//\//--}"
   for REF in main master; do
@@ -383,7 +386,7 @@ docker run -d --name "$NAME" --restart unless-stopped \
   -e VLLM_PLE_MMAP=1 -e VLLM_PLE_MMAP_WORKERS="${WORKERS:-32}" -e VLLM_PLE_MMAP_PREWARM="$PREWARM" \
   -e VLLM_QSA_EXACT_TOPK="$EXACT_TOPK" "${DETENV[@]}" \
   -e VLLM_USE_FLASHINFER_SAMPLER=1 -e VLLM_ALLOW_LONG_MAX_MODEL_LEN="$ALLOW_LONG" \
-  "${HYBRID_ENV[@]}" \
+  "${HYBRID_ENV[@]}" "${DRAFT_ENV[@]}" \
   "$IMAGE" \
   "$SNAP_IN" --served-model-name "$SERVED_MODEL_NAME" \
     --host 0.0.0.0 --port 8000 --load-format safetensors \
