@@ -30,7 +30,7 @@ git clone https://github.com/blazux/qwen3.8-Flash-DGX.git && cd qwen3.8-Flash-DG
 ```
 
 Other recipes are one word away: `./flash profiles` lists them (`speed`, `concurrent`, `context`, `context-1m`,
-`shared`, `published`, `native`), `./flash serve speed` runs one, and any variable can still
+`shared`, `published`, `native`, `dflash`), `./flash serve speed` runs one, and any variable can still
 be overridden on the command line (`./flash serve default MTP=3 PORT=18301`). `./flash status`,
 `logs`, `stop`, `start`, `rm` do what they say. Details in [The `flash` command](#the-flash-command).
 
@@ -317,6 +317,7 @@ one wins; anything below it stays an option.
 | Prefix caching (`PREFIX_CACHE=1`) | **on** | ~14 s → ~1.4 s TTFT on a repeated 20k prefix |
 | `MTP=3` | option (`MTP=2` default) | +7% decode, −1 point at the tournament (44 vs 45/51) |
 | NVFP4 MTP draft experts (`MODE=hybrid-mtp`) | option | +22% KV pool, −3.9 GiB weights, decode unchanged here, tournament neutral (44/51) |
+| DFlash2 draft model (`DRAFT_MODEL`) | option (`dflash` profile) | replaces the MTP head with a 0.6B block-diffusion drafter (0.6B extra weights to load, `DRAFT_TOKENS=7` default); needs the target's full vocabulary, so the reduced-draft-vocab prune is off here; new upstream vLLM feature, validated by incoai on GB300/TP1 — **not measured on this GX10 recipe** |
 | fp8 KV cache (`KV_DTYPE=fp8_e4m3`) | option | ×1.9 KV pool, 1M context. −4% decode, −3 to −17% prefill, tournament 88.4% (3 runs, 500k context) vs 87.8% in bf16 (3 runs); prefix-cache blocks twice as coarse |
 | Exact `torch.topk` (`EXACT_TOPK=1`) | fallback | deterministic like the kernel, −20–40% long prefill |
 | Persistent compile cache (`COMPILE_CACHE`) | option | −37 s of startup per boot after the first (init engine −26 s); startup only, outputs and tournament unaffected |
@@ -350,6 +351,7 @@ Profiles (`profiles/*.env`, each a handful of `serve.sh` variables; copy one to 
 |---|---|---|
 | `default` | hybrid, YaRN 500k, deterministic top-k, reduced draft vocabulary, prefix caching, MTP=2 | the recommended one: best tournament score (45/51) |
 | `speed` | default + `MTP=3` | +7% decode for about one tournament point |
+| `dflash` | default + the DFlash2 draft model (incoai, 0.6B) instead of the MTP head (`DRAFT_MODEL`, `MTP=0`) | block-diffusion drafting (7 draft tokens); a newer vLLM path than MTP — provider-validated on GB300/TP1, not measured here yet; needs the one-time ~1.2 GiB draft download (handled by `./flash setup dflash`) |
 | `concurrent` | default + `SEQS=16`, `MAMBA_SSM_DTYPE=bfloat16`; uses the default CPUSET `5-9,15-19` | higher aggregate throughput with parallel clients; [measured with FP8 KV and an 8 GiB pool](#measured-concurrent-profile-pr-54) |
 | `context` | `MODE=hybrid-mtp` (NVFP4 MTP draft experts) | +22% KV pool for concurrency or long contexts, decode unchanged |
 | `context-1m` | hybrid + `KV_DTYPE=fp8_e4m3`, 1M context | when you need 1M tokens in one request (small speed cost) |
@@ -773,7 +775,7 @@ mmap patch should apply; we have not booted one ourselves.
 | `PREFIX_CACHE` | `1` | `--enable-prefix-caching`. Correct with this image (block_size fix). |
 | `DET_TOPK` | `1` | Deterministic QSA top-k **kernel** (vllm#55122): identical outputs at T=0 at full kernel speed. `0` = stock kernel (non-deterministic, may drop attention candidates, issue #3). |
 | `EXACT_TOPK` | `0` | `1` = exact `torch.topk` fallback (deterministic; −8% prefill at 8k, −20–40% at 32k+). Wins over `DET_TOPK` when set. |
-| `DRAFT_VOCAB` | `1` | MTP drafter scores only the 65,536 most frequent tokens (+20% decode, same tournament score, outputs unchanged). `0` = full vocabulary; a path = your own ids (`tools/build_draft_vocab.py`). |
+| `DRAFT_VOCAB` | `1` | MTP drafter scores only the 65,536 most frequent tokens (+20% decode, same tournament score, outputs unchanged). `0` = full vocabulary; a path = your own ids (`tools/build_draft_vocab.py`). MTP-head only — ignored for a `DRAFT_MODEL` (dflash) draft, which requires the full verifier vocabulary. |
 | `MADVISE` | `random` | `madvise` on the mmapped PLE table: `random` (no readahead: cold prefill −4–8%, cleaner page cache) or `normal`. |
 | `FAST_ROWS` | `0` | PLE gathers of up to this many unique rows run inline on one thread; larger ones are split across the `WORKERS` pool. `0` sends every gather to the pool, so page faults on rows the page cache dropped overlap instead of queueing: +8% decode at 1 stream, +17% aggregate at 4 streams, same rows (see the 2026-09-14 update). `512` = the old inline fast path, faster only when every row is already cached. |
 | `EFFORT_ALIAS` | `1` | Accept every `reasoning_effort` a client can send. The checkpoints' template takes only `xhigh` (default), `medium` and `low` and 400s the rest — including Claude Code's default `high`. `1` serves a copy of the checkpoint's own template whose effort-resolving line maps `high`/`max` → `xhigh` and `minimal` → `low` (other values render byte-identically; the copy goes to the first writable of `$HF_CACHE/qwen38-flash-dgx/chat-templates/`, `~/.cache/qwen38-flash-dgx/chat-templates/` and `.cache/chat-templates/` in the checkout, and is bind-mounted into the container, so a root-owned HF cache does not disable it). Applied only when the template has that check and that exact line. `0` = the template as shipped. |
@@ -1201,6 +1203,7 @@ tools/pyspy_slices.py             summarize those slices by process / thread / f
 tools/Dockerfile.memory-diagnostics optional logging-only image for automatic KV sizing (issue #51)
 tools/patch_memory_profile_logging.py startup memory snapshots without allocation changes
 scripts/download-weights.sh       MODEL (default nvidia/Qwen3.8-Flash-Next-NVFP4), EXCLUDE, MAX_WORKERS, XET
+scripts/download-draft.sh         one-time: the DFlash2 draft model (DRAFT_MODEL, default incoai/Qwen3.8-Flash-Next-DFlash2, ~1.2 GiB) for the dflash profile
 scripts/prepare-hybrid.sh         one-time: build the -fp8hybrid snapshot
 scripts/prepare-mtp-graft.sh      one-time: graft the NVFP4 MTP draft experts onto it (MODE=hybrid-mtp, RadixArk only)
 tools/vllm_watch.py               live per-session view of prompts / reasoning / outputs / stats (needs LOG_REQUESTS=1; @0x3dlux)
