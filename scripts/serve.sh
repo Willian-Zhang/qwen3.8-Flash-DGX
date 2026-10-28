@@ -56,8 +56,9 @@
 #   DRAFT_MODEL=      a HF draft model (org/name) for vLLM's dflash speculative decoding:
 #                     replaces the MTP head with a block-diffusion draft model (incoai's
 #                     DFlash2, 0.6B, ~1.2 GiB — scripts/download-draft.sh). MTP=0 is implied.
-#   DRAFT_TOKENS=7    speculative tokens for DRAFT_MODEL (the draft's block size minus 1;
-#                     incoai's Flash-Next draft has block size 8, so 7 is its default)
+#   DRAFT_TOKENS=4    speculative tokens for DRAFT_MODEL (the trained block is 8 =
+#                     anchor + 7; 4 is the measured arm on the GB10 - acceptance is
+#                     down to ~0.15 by position 4, so the deeper block buys little)
 #   KV_DTYPE=auto     auto (=bf16) recommended; fp8_e4m3 = x1.9 KV / 1M ctx at a speed+quality cost (README)
 #   PREWARM=0         1 = stream the 48 GiB table once at boot to warm the page cache
 #   WORKERS=32        threads for the mmap gather
@@ -95,7 +96,7 @@ MAMBA_SSM_DTYPE="${MAMBA_SSM_DTYPE:-}"
 GPU_MEM="${GPU_MEM:-0.80}"
 MTP="${MTP:-2}"
 DRAFT_MODEL="${DRAFT_MODEL:-}"
-DRAFT_TOKENS="${DRAFT_TOKENS:-7}"
+DRAFT_TOKENS="${DRAFT_TOKENS:-4}"
 KV_DTYPE="${KV_DTYPE:-auto}"
 KV_CACHE_MEM="${KV_CACHE_MEM:-}"
 PROM_MULTIPROC="${PROM_MULTIPROC:-0}"
@@ -233,6 +234,8 @@ if [ "$YARN" != 0 ]; then OVR_ARGS=(--hf-overrides "$YARN_OVR"); ALLOW_LONG=1; f
 # per vllm-project/vllm#56088, recipe PixelML/deepspec-qwen38-flash-next/serving).
 # dflash is V2-runner-only, so the V2 runner is pinned here; rebuild the image
 # (docker build) after pulling so patch 23 is present.
+# MEASURED 2026-10-28 (GB10 TP1, hybrid, YaRN 500k, DRAFT_TOKENS=4): 56.7 tok/s decode
+# (bench/perf.py, mean acceptance ~2.4) vs 38.5 default MTP=2 / 41.2 speed MTP=3.
 SPEC=()
 DRAFT_ENV=()
 if [ -n "$DRAFT_MODEL" ]; then

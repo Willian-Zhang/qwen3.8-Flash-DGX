@@ -106,6 +106,8 @@ the reported workarounds. See [reproduction and validation](docs/VLLM-032.md#lon
 
 | Date | Change |
 |---|---|
+| 2026-10-28 | **dflash/DFlash2 measured (experimental):** patch 23 opens the vLLM Qwen4Exp drafter guards catalogued in [vllm#56088](https://github.com/vllm-project/vllm/issues/56088) (allowlist + target aux-hidden-state capture + QSA ring port of [#54912](https://github.com/vllm-project/vllm/pull/54912)); the `dflash` profile serves incoai's [DFlash2](https://huggingface.co/incoai/Qwen3.8-Flash-Next-DFlash2) draft at **56.7 tok/s decode** on the GB10 (K=4, mean acceptance 2.4) vs 41.2 for `speed`. Branch `experimental/dflash`; no tournament pass yet. |
+|---|---|
 | 2026-10-22 | **Long-context MTP crash:** patch 22 extends M-RoPE caches past the native 262k boundary for YaRN serving, preserving the original frequency calculations. Thanks to **[@FinSnow](https://github.com/FinSnow)** for [#60](https://github.com/blazux/qwen3.8-Flash-DGX/issues/60) and **[@wtogami](https://github.com/wtogami)** for the [upstream fix](https://github.com/vllm-project/vllm/pull/62409). [Details](#long-context-mtp-crash-fix-issue-60). |
 | 2026-10-22 | **Official vLLM v0.32 base:** requested by **[@neo42man](https://github.com/neo42man)** ([#58](https://github.com/blazux/qwen3.8-Flash-DGX/issues/58)), with an independent patch audit by **[@rp-tn](https://github.com/rp-tn)** ([#59](https://github.com/blazux/qwen3.8-Flash-DGX/issues/59)). Preserves hybrid QSA scale layout, mmap PLE, tool parsing and Responses fixes. [Upgrade and validation](docs/VLLM-032.md). |
 | 2026-10-20 | **Schema-validated tool arguments:** patch 21 ports **[@Chaos2522](https://github.com/Chaos2522)**'s repair for accidental `arguments` wrappers to v0.31, preserving valid payloads and Chat compatibility ([#31](https://github.com/blazux/qwen3.8-Flash-DGX/issues/31#issuecomment-6291191080)). [Behavior and validation](#schema-validated-tool-arguments-issue-31). |
@@ -317,16 +319,19 @@ one wins; anything below it stays an option.
 | Prefix caching (`PREFIX_CACHE=1`) | **on** | ~14 s → ~1.4 s TTFT on a repeated 20k prefix |
 | `MTP=3` | option (`MTP=2` default) | +7% decode, −1 point at the tournament (44 vs 45/51) |
 | NVFP4 MTP draft experts (`MODE=hybrid-mtp`) | option | +22% KV pool, −3.9 GiB weights, decode unchanged here, tournament neutral (44/51) |
-| DFlash2 draft model (`DRAFT_MODEL`) | option (`dflash` profile) | the 0.6B block-diffusion drafter replaces the MTP head; the Qwen4Exp engine guards are opened in the image by patch 23 (allowlist + target aux capture + QSA ring, per [vllm#56088](https://github.com/vllm-project/vllm/issues/56088), recipe [PixelML/deepspec-qwen38-flash-next](https://github.com/PixelML/deepspec-qwen38-flash-next/tree/main/serving)) — **not benched; the MTP path is the measured one** |
+| DFlash2 draft model (`DRAFT_MODEL`) | option (`dflash` profile) | the 0.6B block-diffusion drafter replaces the MTP head; the Qwen4Exp engine guards are opened in the image by patch 23 (allowlist + target aux capture + QSA ring, per [vllm#56088](https://github.com/vllm-project/vllm/issues/56088), recipe [PixelML/deepspec-qwen38-flash-next](https://github.com/PixelML/deepspec-qwen38-flash-next/tree/main/serving)). **Measured 2026-10-28 on the GB10 at `DRAFT_TOKENS=4`: 56.7 tok/s decode, mean acceptance length 2.4** vs 38.5 default (MTP=2) / 41.2 speed (MTP=3); lossless by construction (target verifies every draft token). No tournament pass yet, so quality-first users stay on the default |
 | fp8 KV cache (`KV_DTYPE=fp8_e4m3`) | option | ×1.9 KV pool, 1M context. −4% decode, −3 to −17% prefill, tournament 88.4% (3 runs, 500k context) vs 87.8% in bf16 (3 runs); prefix-cache blocks twice as coarse |
 | Exact `torch.topk` (`EXACT_TOPK=1`) | fallback | deterministic like the kernel, −20–40% long prefill |
 | Persistent compile cache (`COMPILE_CACHE`) | option | −37 s of startup per boot after the first (init engine −26 s); startup only, outputs and tournament unaffected |
 | `concurrent` profile (`SEQS=16`, BF16 GDN state) | option | +21–94% aggregate throughput at 8–32 clients with the tested FP8 KV settings; second 55-scenario tournament pass 88.8% vs 88.9%, with one request timeout; [measurements below](#measured-concurrent-profile-pr-54) |
 | `--long-prefill-token-threshold` (via `EXTRA`) | option | keeps decoding clients responsive under concurrent prefills, at a TTFT cost |
 
-If your priority is raw throughput rather than the agent's reliability, the fast profile is
+If your priority is raw throughput rather than the agent's reliability, the fast MTP profile is
 `MODE=hybrid MTP=3` (41 tok/s in the tournament against 38.5 for the default), and
 `MODE=hybrid-mtp` on top if you need the KV pool more than the last few percent of quality.
+The `dflash` profile now beats both on the same box (56.7 tok/s decode measured 2026-10-28,
+lossless by construction) — but it has no tournament pass yet and needs the patch-23 rebuild,
+so it is offered as the experimental fast path, not the recommendation.
 For parallel workloads, the `concurrent` profile raises the running-request cap to 16
 and uses BF16 recurrent state; see the [GX10 measurements](#measured-concurrent-profile-pr-54).
 
@@ -351,7 +356,7 @@ Profiles (`profiles/*.env`, each a handful of `serve.sh` variables; copy one to 
 |---|---|---|
 | `default` | hybrid, YaRN 500k, deterministic top-k, reduced draft vocabulary, prefix caching, MTP=2 | the recommended one: best tournament score (45/51) |
 | `speed` | default + `MTP=3` | +7% decode for about one tournament point |
-| `dflash` | default + the DFlash2 draft model (incoai, 0.6B) instead of the MTP head (`DRAFT_MODEL`, `MTP=0`) | **currently blocked**: vLLM 0.32.0's Qwen4Exp target accepts no drafter but MTP/ngram, so the boot stops at config ([vllm#56088](https://github.com/vllm-project/vllm/issues/56088), patches public — [recipe](https://github.com/PixelML/deepspec-qwen38-flash-next/tree/main/serving)); the profile exercises the whole draft plumbing for re-testing when it lands |
+| `dflash` | default + the DFlash2 draft model (incoai, 0.6B) instead of the MTP head (`DRAFT_MODEL`, `MTP=0`, `DRAFT_TOKENS=4`) | the fastest measured decode on the GB10: 56.7 tok/s (vs 41.2 `speed`) since patch 23 opened the vllm#56088 guards; experimental — needs `docker build`, no tournament pass yet |
 | `concurrent` | default + `SEQS=16`, `MAMBA_SSM_DTYPE=bfloat16`; uses the default CPUSET `5-9,15-19` | higher aggregate throughput with parallel clients; [measured with FP8 KV and an 8 GiB pool](#measured-concurrent-profile-pr-54) |
 | `context` | `MODE=hybrid-mtp` (NVFP4 MTP draft experts) | +22% KV pool for concurrency or long contexts, decode unchanged |
 | `context-1m` | hybrid + `KV_DTYPE=fp8_e4m3`, 1M context | when you need 1M tokens in one request (small speed cost) |

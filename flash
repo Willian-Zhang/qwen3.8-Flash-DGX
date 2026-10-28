@@ -72,7 +72,7 @@ load_profile() {
   export MODEL="${MODEL:-$MODEL_DEFAULT}" HF_CACHE="${HF_CACHE:-$HOME/.cache/huggingface}"
   export GPU_MEM="${GPU_MEM:-0.80}" KV_DTYPE="${KV_DTYPE:-auto}"
   export IMAGE="${IMAGE:-qwen38-flash-dgx:v0.32}"
-  export DRAFT_MODEL="${DRAFT_MODEL:-}" DRAFT_TOKENS="${DRAFT_TOKENS:-7}"
+  export DRAFT_MODEL="${DRAFT_MODEL:-}" DRAFT_TOKENS="${DRAFT_TOKENS:-4}"
 }
 
 # The image must match the current recipe. Retain old images locally for rollback.
@@ -237,7 +237,7 @@ cmd_doctor() {
   fi
   if [ -n "${DRAFT_MODEL:-}" ]; then
     if have_draft; then ok "draft model present: $(draft_snapshot_dir)"; else info "draft model not downloaded yet (one-time, ~1.2 GiB: ./flash setup $profile or scripts/download-draft.sh)"; fi
-    info "dflash draft path is opened in the image by patch 23 (vllm#56088 seams: allowlist + target aux capture + QSA ring) - rebuild the image (docker build) after pulling, and note it is unbenched; the MTP default (./flash serve default) is the measured config"
+    info "dflash is live since patch 23 (vllm#56088 seams; rebuild the image after pulling): measured 2026-10-28 on this box at DRAFT_TOKENS=4, 56.7 tok/s decode vs 41.2 for the speed profile — still no tournament pass, so quality-first users stay on ./flash serve default"
   fi
   if [ -n "${HF_TOKEN:-}${HUGGING_FACE_HUB_TOKEN:-}" ]; then ok "HF token in the environment"; else info "no HF_TOKEN: downloads work but the Hub may rate-limit; export HF_TOKEN=... to be safe"; fi
 
@@ -292,7 +292,7 @@ cmd_serve() {
   need_profile "$profile"; load_profile "$PROFILE_FILE" "$@"
   echo "serve — profile '$profile': $(profile_meta "$PROFILE_FILE" desc)"
   printf '%s  MODE=%s IMAGE=%s NAME=%s PORT=%s CTX=%s YARN=%s MTP=%s SEQS=%s GPU_MEM=%s KV_DTYPE=%s%s\n' "$c_dim" "$MODE" "$IMAGE" "$NAME" "$PORT" "${CTX:-262144}" "${YARN:-0}" "${MTP:-2}" "${SEQS:-8}" "$GPU_MEM" "$KV_DTYPE" "$c_off"
-  [ -n "${DRAFT_MODEL:-}" ] && printf '%s  DRAFT_MODEL=%s DRAFT_TOKENS=%s%s\n' "$c_dim" "$DRAFT_MODEL" "${DRAFT_TOKENS:-7}" "$c_off" || true
+  [ -n "${DRAFT_MODEL:-}" ] && printf '%s  DRAFT_MODEL=%s DRAFT_TOKENS=%s%s\n' "$c_dim" "$DRAFT_MODEL" "${DRAFT_TOKENS:-4}" "$c_off" || true
   [ -n "${CPUSET:-}${MAMBA_SSM_DTYPE:-}" ] && printf '%s  CPUSET=%s MAMBA_SSM_DTYPE=%s%s\n' "$c_dim" "${CPUSET:--}" "${MAMBA_SSM_DTYPE:--}" "$c_off" || true
   [ -n "${EXTRA:-}" ] && printf '%s  EXTRA=%s%s\n' "$c_dim" "$EXTRA" "$c_off" || true
   have_image || die "$IMAGE is not built — run: ./flash setup $profile"
