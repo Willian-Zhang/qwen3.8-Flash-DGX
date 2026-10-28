@@ -226,7 +226,7 @@ if [ "$YARN" != 0 ]; then OVR_ARGS=(--hf-overrides "$YARN_OVR"); ALLOW_LONG=1; f
 # This sets the length limit only; it does not copy YaRN's RoPE parameters to MTP.
 # DRAFT_MODEL (a separate draft-model repo, e.g. incoai's DFlash2) replaces the MTP
 # head entirely: vLLM's dflash speculative method, a block-diffusion drafter verified
-# against the target's hidden states (lossless, like MTP). It takes the same YaRN
+# against the target's hidden states. It takes the same YaRN
 # max_model_len treatment as the MTP draft, and the draft snapshot is already on disk
 # under the HF cache mount, so no second mount or download at serve time.
 # STATUS 2026-10-27: the guard is opened in the image by patch 23
@@ -234,8 +234,9 @@ if [ "$YARN" != 0 ]; then OVR_ARGS=(--hf-overrides "$YARN_OVR"); ALLOW_LONG=1; f
 # per vllm-project/vllm#56088, recipe PixelML/deepspec-qwen38-flash-next/serving).
 # dflash is V2-runner-only, so the V2 runner is pinned here; rebuild the image
 # (docker build) after pulling so patch 23 is present.
-# MEASURED 2026-10-28 (GB10 TP1, hybrid, YaRN 500k, DRAFT_TOKENS=4): 56.7 tok/s decode
-# (bench/perf.py, mean acceptance ~2.4) vs 38.5 default MTP=2 / 41.2 speed MTP=3.
+# MEASURED 2026-10-28 (GX10, matched serving settings, context 500k, DRAFT_TOKENS=4):
+# 57.0 vs 45.2 tok/s with MTP=2 (+26% single-request throughput, including latency).
+# No quality degradation observed in validation; DFlash uses more GPU memory.
 SPEC=()
 DRAFT_ENV=()
 if [ -n "$DRAFT_MODEL" ]; then

@@ -237,7 +237,7 @@ cmd_doctor() {
   fi
   if [ -n "${DRAFT_MODEL:-}" ]; then
     if have_draft; then ok "draft model present: $(draft_snapshot_dir)"; else info "draft model not downloaded yet (one-time, ~1.2 GiB: ./flash setup $profile or scripts/download-draft.sh)"; fi
-    info "dflash is live since patch 23 (vllm#56088 seams; rebuild the image after pulling): measured 2026-10-28 on this box at DRAFT_TOKENS=4, 56.7 tok/s decode vs 41.2 for the speed profile — still no tournament pass, so quality-first users stay on ./flash serve default"
+    info "dflash is live since patch 23 (vllm#56088 seams; rebuild the image after pulling): matched measurement at DRAFT_TOKENS=4: 57.0 vs 45.2 tok/s with MTP=2 (+26% single-request throughput); no quality degradation observed in validation; allow extra GPU memory"
   fi
   if [ -n "${HF_TOKEN:-}${HUGGING_FACE_HUB_TOKEN:-}" ]; then ok "HF token in the environment"; else info "no HF_TOKEN: downloads work but the Hub may rate-limit; export HF_TOKEN=... to be safe"; fi
 

@@ -318,7 +318,7 @@ one wins; anything below it stays an option.
 | Prefix caching (`PREFIX_CACHE=1`) | **on** | ~14 s → ~1.4 s TTFT on a repeated 20k prefix |
 | `MTP=3` | option (`MTP=2` default) | +7% decode, −1 point at the tournament (44 vs 45/51) |
 | NVFP4 MTP draft experts (`MODE=hybrid-mtp`) | option | +22% KV pool, −3.9 GiB weights, decode unchanged here, tournament neutral (44/51) |
-| DFlash2 draft model (`DRAFT_MODEL`) | option (`dflash` profile) | +47% decode (56.7 tok/s at K=4, mean acceptance 2.4; `speed` is +7% against the same baseline), 0.6B drafter replaces the MTP head. |
+| DFlash2 draft model (`DRAFT_MODEL`) | option (`dflash` profile) | +26% single-request generation throughput (57.0 vs 45.2 tok/s with MTP=2 in a matched comparison, K=4). No quality degradation observed in validation. Uses more GPU memory; see [DFlash profile](#dflash-profile). |
 | fp8 KV cache (`KV_DTYPE=fp8_e4m3`) | option | ×1.9 KV pool, 1M context. −4% decode, −3 to −17% prefill, tournament 88.4% (3 runs, 500k context) vs 87.8% in bf16 (3 runs); prefix-cache blocks twice as coarse |
 | Exact `torch.topk` (`EXACT_TOPK=1`) | fallback | deterministic like the kernel, −20–40% long prefill |
 | Persistent compile cache (`COMPILE_CACHE`) | option | −37 s of startup per boot after the first (init engine −26 s); startup only, outputs and tournament unaffected |
@@ -328,7 +328,7 @@ one wins; anything below it stays an option.
 If your priority is raw throughput rather than the agent's reliability, the fast MTP profile is
 `MODE=hybrid MTP=3` (41 tok/s in the tournament against 38.5 for the default), and
 `MODE=hybrid-mtp` on top if you need the KV pool more than the last few percent of quality.
-The `dflash` profile now beats both on the same box (56.7 tok/s decode measured).
+The `dflash` profile reaches 57.0 tok/s in a matched comparison against 45.2 tok/s for MTP=2 (+26%); see [DFlash profile](#dflash-profile).
 For parallel workloads, the `concurrent` profile raises the running-request cap to 16
 and uses BF16 recurrent state; see the [GX10 measurements](#measured-concurrent-profile-pr-54).
 
@@ -353,7 +353,7 @@ Profiles (`profiles/*.env`, each a handful of `serve.sh` variables; copy one to 
 | --- | --- | --- |
 | `default` | hybrid, YaRN 500k, deterministic top-k, reduced draft vocabulary, prefix caching, MTP=2 | the recommended one: best tournament score (45/51) |
 | `speed` | default + `MTP=3` | +7% decode for about one tournament point |
-| `dflash` | default + the DFlash2 draft model (incoai, 0.6B) instead of the MTP head (`DRAFT_MODEL`, `MTP=0`, `DRAFT_TOKENS=4`) | the fastest measured decode on the GB10: 56.7 tok/s (vs 41.2 `speed`). |
+| `dflash` | default + the DFlash2 draft model (incoai, 0.6B) instead of the MTP head (`DRAFT_MODEL`, `MTP=0`, `DRAFT_TOKENS=4`) | +26% single-request generation throughput in a matched comparison; no quality degradation observed. Higher GPU memory use. |
 | `concurrent` | default + `SEQS=16`, `MAMBA_SSM_DTYPE=bfloat16`; uses the default CPUSET `5-9,15-19` | higher aggregate throughput with parallel clients; [measured with FP8 KV and an 8 GiB pool](#measured-concurrent-profile-pr-54) |
 | `context` | `MODE=hybrid-mtp` (NVFP4 MTP draft experts) | +22% KV pool for concurrency or long contexts, decode unchanged |
 | `context-1m` | hybrid + `KV_DTYPE=fp8_e4m3`, 1M context | when you need 1M tokens in one request (small speed cost) |
@@ -364,6 +364,33 @@ Profiles (`profiles/*.env`, each a handful of `serve.sh` variables; copy one to 
 Precedence: a variable already in your environment beats the profile (`PORT=18301 ./flash serve`
 works like the plain scripts), and `KEY=VALUE` arguments beat both. Container name and port default
 to `qwen38-flash` and `18300`, like `serve.sh`.
+
+### DFlash profile
+
+`./flash setup dflash` prepares the draft model; after updating an existing checkout,
+rebuild the image with `docker build -t qwen38-flash-dgx:v0.32 .` to include patch 23.
+Start it with `./flash serve dflash`. This adds a separate profile; the existing
+profiles and default selection are unchanged.
+
+Measured on the GX10 with the same target checkpoint and matched serving settings,
+a 500k context window and `DRAFT_TOKENS=4`. Rates below are medians;
+generation throughput includes request latency, and concurrent rates are totals
+across all requests.
+
+| Metric | MTP=2 | DFlash K=4 | Improvement |
+| --- | ---: | ---: | ---: |
+| Single-request generation | 45.2 tok/s | 57.0 tok/s | +26% |
+| 4 concurrent requests — total throughput | 107.2 tok/s | 120.5 tok/s | +12% |
+| 8 concurrent requests — total throughput | 167.0 tok/s | 176.1 tok/s | +5% |
+| 100k-token prefill | 3,094 tok/s | 3,209 tok/s | +4% |
+
+No quality degradation was observed in our validation.
+
+**Memory trade-off:** DFlash uses more GPU memory than native MTP. Allow extra
+headroom for the drafter and serving caches: a memory budget that works with MTP
+may be insufficient for DFlash at the same context length or concurrency.
+Check available memory with `./flash doctor dflash` and size the serving memory
+budget for your workload.
 
 ## Requirements
 
