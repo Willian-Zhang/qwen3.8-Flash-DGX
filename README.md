@@ -30,7 +30,7 @@ git clone https://github.com/blazux/qwen3.8-Flash-DGX.git && cd qwen3.8-Flash-DG
 ```
 
 Other recipes are one word away: `./flash profiles` lists them (`speed`, `concurrent`, `context`, `context-1m`,
-`shared`, `published`, `native`), `./flash serve speed` runs one, and any variable can still
+`shared`, `published`, `native`, `dflash`), `./flash serve speed` runs one, and any variable can still
 be overridden on the command line (`./flash serve default MTP=3 PORT=18301`). `./flash status`,
 `logs`, `stop`, `start`, `rm` do what they say. Details in [The `flash` command](#the-flash-command).
 
@@ -105,7 +105,8 @@ the reported workarounds. See [reproduction and validation](docs/VLLM-032.md#lon
 ## Recent changes
 
 | Date | Change |
-|---|---|
+| --- | --- |
+| 2026-10-28 | **dflash/DFlash2 drafter support:** the `dflash` profile replaces the MTP head with incoai's [Qwen3.8-Flash-Next-DFlash2](https://huggingface.co/incoai/Qwen3.8-Flash-Next-DFlash2), a 0.6B block-diffusion drafter (one-time 1.2 GiB download, `./flash setup dflash`). vLLM refuses this combination on this target out of the box — the five blockers are catalogued in [vllm#56088](https://github.com/vllm-project/vllm/issues/56088) — so **patch 23** opens the speculative-method allowlist, mounts the target-side aux hidden-state capture the drafter conditions on (completed-layer HC-mean taps, incoai's own recipe), and backports the upstream QSA ring fix [#54912](https://github.com/vllm-project/vllm/pull/54912). Thanks to **[@roozich](https://github.com/roozich)** for the patch and [PR #62](https://github.com/blazux/qwen3.8-Flash-DGX/pull/62). |
 | 2026-10-22 | **Long-context MTP crash:** patch 22 extends M-RoPE caches past the native 262k boundary for YaRN serving, preserving the original frequency calculations. Thanks to **[@FinSnow](https://github.com/FinSnow)** for [#60](https://github.com/blazux/qwen3.8-Flash-DGX/issues/60) and **[@wtogami](https://github.com/wtogami)** for the [upstream fix](https://github.com/vllm-project/vllm/pull/62409). [Details](#long-context-mtp-crash-fix-issue-60). |
 | 2026-10-22 | **Official vLLM v0.32 base:** requested by **[@neo42man](https://github.com/neo42man)** ([#58](https://github.com/blazux/qwen3.8-Flash-DGX/issues/58)), with an independent patch audit by **[@rp-tn](https://github.com/rp-tn)** ([#59](https://github.com/blazux/qwen3.8-Flash-DGX/issues/59)). Preserves hybrid QSA scale layout, mmap PLE, tool parsing and Responses fixes. [Upgrade and validation](docs/VLLM-032.md). |
 | 2026-10-20 | **Schema-validated tool arguments:** patch 21 ports **[@Chaos2522](https://github.com/Chaos2522)**'s repair for accidental `arguments` wrappers to v0.31, preserving valid payloads and Chat compatibility ([#31](https://github.com/blazux/qwen3.8-Flash-DGX/issues/31#issuecomment-6291191080)). [Behavior and validation](#schema-validated-tool-arguments-issue-31). |
@@ -308,7 +309,7 @@ up to 2 points day to day, so anything inside that band is treated as equal and 
 one wins; anything below it stays an option.
 
 | what | default | measured effect (GX10, hybrid, MTP=2, prefix caching, YaRN 500k) |
-|---|---|---|
+| --- | --- | --- |
 | Checkpoint (`MODEL`) | **`nvidia/Qwen3.8-Flash-Next-NVFP4`** (since 2026-09-14) | vs RadixArk, 5 × 55 scenarios: 88.8% ± 1.0 vs 86.1% ± 1.9, runaway rate equal, needle and determinism equal; +15–22% KV pool, −8% single-stream decode |
 | Hybrid checkpoint (`MODE=hybrid`) | recommended, `nvfp4` as published is the default | +20% decode, +8% KV, same tournament score |
 | Deterministic top-k kernel (`DET_TOPK=1`) | **on** | identical greedy outputs, full prefill speed, tournament neutral (44/51) |
@@ -317,15 +318,17 @@ one wins; anything below it stays an option.
 | Prefix caching (`PREFIX_CACHE=1`) | **on** | ~14 s → ~1.4 s TTFT on a repeated 20k prefix |
 | `MTP=3` | option (`MTP=2` default) | +7% decode, −1 point at the tournament (44 vs 45/51) |
 | NVFP4 MTP draft experts (`MODE=hybrid-mtp`) | option | +22% KV pool, −3.9 GiB weights, decode unchanged here, tournament neutral (44/51) |
+| DFlash2 draft model (`DRAFT_MODEL`) | option (`dflash` profile) | +26% single-request generation throughput (57.0 vs 45.2 tok/s with MTP=2 in a matched comparison, K=4). No quality degradation observed in validation. Uses more GPU memory; see [DFlash profile](#dflash-profile). |
 | fp8 KV cache (`KV_DTYPE=fp8_e4m3`) | option | ×1.9 KV pool, 1M context. −4% decode, −3 to −17% prefill, tournament 88.4% (3 runs, 500k context) vs 87.8% in bf16 (3 runs); prefix-cache blocks twice as coarse |
 | Exact `torch.topk` (`EXACT_TOPK=1`) | fallback | deterministic like the kernel, −20–40% long prefill |
 | Persistent compile cache (`COMPILE_CACHE`) | option | −37 s of startup per boot after the first (init engine −26 s); startup only, outputs and tournament unaffected |
 | `concurrent` profile (`SEQS=16`, BF16 GDN state) | option | +21–94% aggregate throughput at 8–32 clients with the tested FP8 KV settings; second 55-scenario tournament pass 88.8% vs 88.9%, with one request timeout; [measurements below](#measured-concurrent-profile-pr-54) |
 | `--long-prefill-token-threshold` (via `EXTRA`) | option | keeps decoding clients responsive under concurrent prefills, at a TTFT cost |
 
-If your priority is raw throughput rather than the agent's reliability, the fast profile is
+If your priority is raw throughput rather than the agent's reliability, the fast MTP profile is
 `MODE=hybrid MTP=3` (41 tok/s in the tournament against 38.5 for the default), and
 `MODE=hybrid-mtp` on top if you need the KV pool more than the last few percent of quality.
+The `dflash` profile reaches 57.0 tok/s in a matched comparison against 45.2 tok/s for MTP=2 (+26%); see [DFlash profile](#dflash-profile).
 For parallel workloads, the `concurrent` profile raises the running-request cap to 16
 and uses BF16 recurrent state; see the [GX10 measurements](#measured-concurrent-profile-pr-54).
 
@@ -335,7 +338,7 @@ and uses BF16 recurrent state; see the [GX10 measurements](#measured-concurrent-
 variables, checks what is already done, and tells you what is missing.
 
 | command | what it does |
-|---|---|
+| --- | --- |
 | `./flash doctor [profile]` | checks arm64/GB10, the 128 GB pool and how much of it is free right now (vLLM needs `GPU_MEM` × total *free* to boot), docker + nvidia runtime, other running containers, the port, the image and its base label, the checkpoint, the prepared layouts, disk space for what is still to download, and the profile itself (YaRN vs context, context vs KV dtype) |
 | `./flash setup [profile]` | build the image if missing or using an older base, download the weights, prepare the hybrid layout and the MTP graft; completed steps are skipped. Source-only updates on the same base require an explicit `docker build`. |
 | `./flash serve [profile] [KEY=VALUE…]` | loads the profile, applies your overrides, refuses early if something is missing, then `exec`s `scripts/serve.sh` |
@@ -347,9 +350,10 @@ variables, checks what is already done, and tells you what is missing.
 Profiles (`profiles/*.env`, each a handful of `serve.sh` variables; copy one to make your own):
 
 | profile | recipe | when |
-|---|---|---|
+| --- | --- | --- |
 | `default` | hybrid, YaRN 500k, deterministic top-k, reduced draft vocabulary, prefix caching, MTP=2 | the recommended one: best tournament score (45/51) |
 | `speed` | default + `MTP=3` | +7% decode for about one tournament point |
+| `dflash` | default + the DFlash2 draft model (incoai, 0.6B) instead of the MTP head (`DRAFT_MODEL`, `MTP=0`, `DRAFT_TOKENS=4`) | +26% single-request generation throughput in a matched comparison; no quality degradation observed. Higher GPU memory use. |
 | `concurrent` | default + `SEQS=16`, `MAMBA_SSM_DTYPE=bfloat16`; uses the default CPUSET `5-9,15-19` | higher aggregate throughput with parallel clients; [measured with FP8 KV and an 8 GiB pool](#measured-concurrent-profile-pr-54) |
 | `context` | `MODE=hybrid-mtp` (NVFP4 MTP draft experts) | +22% KV pool for concurrency or long contexts, decode unchanged |
 | `context-1m` | hybrid + `KV_DTYPE=fp8_e4m3`, 1M context | when you need 1M tokens in one request (small speed cost) |
@@ -360,6 +364,33 @@ Profiles (`profiles/*.env`, each a handful of `serve.sh` variables; copy one to 
 Precedence: a variable already in your environment beats the profile (`PORT=18301 ./flash serve`
 works like the plain scripts), and `KEY=VALUE` arguments beat both. Container name and port default
 to `qwen38-flash` and `18300`, like `serve.sh`.
+
+### DFlash profile
+
+`./flash setup dflash` prepares the draft model; after updating an existing checkout,
+rebuild the image with `docker build -t qwen38-flash-dgx:v0.32 .` to include patch 23.
+Start it with `./flash serve dflash`. This adds a separate profile; the existing
+profiles and default selection are unchanged.
+
+Measured on the GX10 with the same target checkpoint and matched serving settings,
+a 500k context window and `DRAFT_TOKENS=4`. Rates below are medians;
+generation throughput includes request latency, and concurrent rates are totals
+across all requests.
+
+| Metric | MTP=2 | DFlash K=4 | Improvement |
+| --- | ---: | ---: | ---: |
+| Single-request generation | 45.2 tok/s | 57.0 tok/s | +26% |
+| 4 concurrent requests — total throughput | 107.2 tok/s | 120.5 tok/s | +12% |
+| 8 concurrent requests — total throughput | 167.0 tok/s | 176.1 tok/s | +5% |
+| 100k-token prefill | 3,094 tok/s | 3,209 tok/s | +4% |
+
+No quality degradation was observed in our validation.
+
+**Memory trade-off:** DFlash uses more GPU memory than native MTP. Allow extra
+headroom for the drafter and serving caches: a memory budget that works with MTP
+may be insufficient for DFlash at the same context length or concurrency.
+Check available memory with `./flash doctor dflash` and size the serving memory
+budget for your workload.
 
 ## Requirements
 
@@ -382,7 +413,7 @@ Measured by [@techfury90](https://github.com/techfury90) on a DGX Spark on gigab
 pulling 81 GB (we saw the same ~105 MB/s on ours):
 
 | | rate | 81 GB takes |
-|---|---|---|
+| --- | --- | --- |
 | plain HTTPS, 8 workers (default) | 14.7 MB/s (117 Mbit/s) | ~92 min |
 | `XET=1` | **101 MB/s (809 Mbit/s)** | **13.4 min** |
 
@@ -411,6 +442,7 @@ curl http://localhost:18300/v1/chat/completions -H 'Content-Type: application/js
   "max_tokens": 512
 }'
 ```
+
 The example uses the default served model name. If you start the server with `SERVED_MODEL_NAME=<name>`, use that value in the request's `model` field instead.
 
 `MODE=nvfp4 scripts/serve.sh` (the default) serves the checkpoint as published at the native
@@ -424,7 +456,7 @@ RadixArk's with `MODEL=`); pick with `MODE=`. The table below was measured on Ra
 on NVIDIA's the same conversion takes decode from ~28 to ~34 tok/s and the KV pool from ~565k to ~680k.
 
 | | `MODE=nvfp4` (default) | `MODE=hybrid` |
-|---|---|---|
+| --- | --- | --- |
 | Routed experts (the bulk, ~63 GiB) | NVFP4 | NVFP4 (unchanged) |
 | GDN in/out projections, QSA q/k/v/o, shared experts (~15 GiB) | bf16, as published | **blockwise fp8-e4m3** (128×128 blocks, DeepSeek layout) |
 | Extra preparation | none | `scripts/prepare-hybrid.sh` once (~10 min, +13 GB disk) |
@@ -472,7 +504,7 @@ parents (it is a directory of symlinks); don't delete either one.
 Measured on the GX10 (hybrid, MTP=2, greedy, real answers):
 
 | | `MODE=hybrid` | `MODE=hybrid-mtp` |
-|---|---|---|
+| --- | --- | --- |
 | Weights on card | 77.83 GiB | **74.75 GiB** (−3.1) |
 | KV cache @0.80 | 625,669 tok | **734,292 tok (+17%)** |
 | Max concurrency @262k | 2.39x | **2.80x** |
@@ -485,7 +517,7 @@ box, same day as the table in [Reduced draft vocabulary](#reduced-draft-vocabula
 full-vocabulary draft on both arms):
 
 | | `MODE=hybrid` | `MODE=hybrid-mtp` |
-|---|---|---|
+| --- | --- | --- |
 | Tournament (17 scenarios × 3) | 44.5/51 | **44/51** (same failures, within the day's noise) |
 | tok/s in the tournament | 33.5 | 33.0 |
 | Decode, single stream (bench) | 33.1 tok/s | 32.6 tok/s |
@@ -605,7 +637,7 @@ Measured on a GX10, hybrid + YaRN 500k + MTP=2, weights over NFS, same recipe ea
 boot:
 
 | boot | init engine | graph captures | start → ready | Triton kernels / driver JIT files written |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | unset (default) | 53.4 s | 10 + 2 s | 121.1 s | 139 / 13 |
 | vllm + flashinfer volumes only | 53.5 s | 10 + 2 s | 110.3 s | 139 / 13 |
 | four volumes, populating | 53.9 s | 10 + 2 s | 111.1 s | 139 / 13 |
@@ -636,7 +668,7 @@ index, `embed_tokens` / `lm_head` are copied in 64 MiB pieces, and the MTP draft
 tensors it doesn't need before reading them. Startup: 2 min 8 s.
 
 | (DGX Spark, hybrid, NVIDIA checkpoint) | before | patch 14 | patches 14–18 |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Loading weights, main model | 450–541 s | 150 s | 35.5 s |
 | Loading weights, MTP drafter | 46 s | 32 s | 1.2 s |
 | startup | ~11 min | 4 min 32 s | 2 min 8 s |
@@ -667,7 +699,7 @@ Measured on the GX10 the way defaults are decided here — the 17-scenario agent
 caching, YaRN 500k):
 
 | configuration | tournament | tok/s in the tournament |
-|---|---|---|
+| --- | --- | --- |
 | hybrid, exact `torch.topk` (the previous default) | 43/51 (84.3%) | 31.4 |
 | + deterministic kernel (PR #10) | 44/51 (86.3%) | 31.9 |
 | + `MADV_RANDOM` on the table | 44.5/51 (87.3%) | 33.5 |
@@ -723,7 +755,7 @@ So the two checkpoints were run through the same protocol, back to back, on the 
 - 16 h of GPU time, 275 scored runs per side, every trajectory kept.
 
 | | RadixArk hybrid + MTP=2 | **NVIDIA hybrid + MTP=2 (default)** |
-|---|---|---|
+| --- | --- | --- |
 | tournament, 5 passes × 55 scenarios | 86.1% ± 1.9 (85.7 / 84.2 / 88.1 / 88.1 / 84.5) | **88.8% ± 1.0** (89.0 / 89.0 / 87.2 / 89.0 / 89.9) |
 | items lost on the 46 scenarios that never run away (230 runs) | 4.1 | **0.7** |
 | reasoning runaways (32k-token cap), all coding tasks | 49/65 | 46/65 (p = 0.55: equal) |
@@ -768,12 +800,12 @@ mmap patch should apply; we have not booted one ourselves.
 ## Tuning (env vars for `scripts/serve.sh`)
 
 | Var | Default | Notes |
-|---|---|---|
+| --- | --- | --- |
 | `MODE` | `nvfp4` | `hybrid` = fp8 side layers (see above; needs `scripts/prepare-hybrid.sh`). |
 | `PREFIX_CACHE` | `1` | `--enable-prefix-caching`. Correct with this image (block_size fix). |
 | `DET_TOPK` | `1` | Deterministic QSA top-k **kernel** (vllm#55122): identical outputs at T=0 at full kernel speed. `0` = stock kernel (non-deterministic, may drop attention candidates, issue #3). |
 | `EXACT_TOPK` | `0` | `1` = exact `torch.topk` fallback (deterministic; −8% prefill at 8k, −20–40% at 32k+). Wins over `DET_TOPK` when set. |
-| `DRAFT_VOCAB` | `1` | MTP drafter scores only the 65,536 most frequent tokens (+20% decode, same tournament score, outputs unchanged). `0` = full vocabulary; a path = your own ids (`tools/build_draft_vocab.py`). |
+| `DRAFT_VOCAB` | `1` | MTP drafter scores only the 65,536 most frequent tokens (+20% decode, same tournament score, outputs unchanged). `0` = full vocabulary; a path = your own ids (`tools/build_draft_vocab.py`). MTP-head only — ignored for a `DRAFT_MODEL` (dflash) draft, which requires the full verifier vocabulary. |
 | `MADVISE` | `random` | `madvise` on the mmapped PLE table: `random` (no readahead: cold prefill −4–8%, cleaner page cache) or `normal`. |
 | `FAST_ROWS` | `0` | PLE gathers of up to this many unique rows run inline on one thread; larger ones are split across the `WORKERS` pool. `0` sends every gather to the pool, so page faults on rows the page cache dropped overlap instead of queueing: +8% decode at 1 stream, +17% aggregate at 4 streams, same rows (see the 2026-09-14 update). `512` = the old inline fast path, faster only when every row is already cached. |
 | `EFFORT_ALIAS` | `1` | Accept every `reasoning_effort` a client can send. The checkpoints' template takes only `xhigh` (default), `medium` and `low` and 400s the rest — including Claude Code's default `high`. `1` serves a copy of the checkpoint's own template whose effort-resolving line maps `high`/`max` → `xhigh` and `minimal` → `low` (other values render byte-identically; the copy goes to the first writable of `$HF_CACHE/qwen38-flash-dgx/chat-templates/`, `~/.cache/qwen38-flash-dgx/chat-templates/` and `.cache/chat-templates/` in the checkout, and is bind-mounted into the container, so a root-owned HF cache does not disable it). Applied only when the template has that check and that exact line. `0` = the template as shipped. |
@@ -864,7 +896,7 @@ PLE CPU offload rather than this repo's mmap — the table-serving cost behaves 
 same way) and found aggregate throughput scales far past single-stream:
 
 | concurrent streams | aggregate tok/s | per stream | major faults / token | TTFT |
-|---:|---:|---:|---:|---:|
+| ---: | ---: | ---: | ---: | ---: |
 | 1 | 17.1 | 17.1 | 16.0 | 0.22 s |
 | 8 | 87.5 | 10.9 | 7.0 | 0.53 s |
 | 16 | 131.6 | 8.2 | 9.6 | 0.83 s |
@@ -904,7 +936,7 @@ MTP=2, prefix caching): one client decoding, then two other clients sending cold
 prompts 10 s later.
 
 | `--long-prefill-token-threshold` | decoding client during the two prefills | p95 / max gap between its tokens | TTFT of each 72k prompt | single-stream prefill 8k / 32k | needle 92k |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | none (8,192 chunks, default) | **0.2 tok/s** | 5.5 s / 7.1 s | 66 s / 110 s | 2,493 / 2,994 tok/s | 46.6 s |
 | 2048 | 0.4–0.6 tok/s | 1.9 s / 3.0 s | 89 s / 89 s | not measured | — |
 | 1024 | 1.0 tok/s | 1.3 s / 2.0 s | 98 s / 98 s | 1,597 / 2,497 tok/s (−36% / −17%) | 64.8 s |
@@ -951,7 +983,7 @@ These three changes were measured together. Settings matching this comparison:
 ```
 
 | Simultaneous requests | Baseline tok/s | Concurrent tok/s | Change |
-|---|---:|---:|---:|
+| --- | ---: | ---: | ---: |
 | 1 | 46.3 | 47.2 | +2.1% |
 | 8 | 185.5 | **225.3** | **+21.5%** |
 | 16 | 186.8 | **362.1** | **+93.8%** |
@@ -978,7 +1010,7 @@ is a capacity gain, not a doubling of the whole KV pool.
 temperature 0.2, four parallel scenarios and a 32,000-token response cap:
 
 | Tournament pass | Baseline | Concurrent |
-|---|---:|---:|
+| --- | ---: | ---: |
 | First | 89.0% | 85.4% |
 | Second | 88.9% | 88.8% |
 | Two-pass mean | 88.95% | 87.1% |
@@ -1177,6 +1209,10 @@ src/patches/qwen-safe-output.patch 19. Qwen token identity, empty STOP failures 
 src/patches/qwen-mtp-aux-output.patch 20. keep target auxiliary outputs out of the MTP draft config
 src/patches/qwen-tool-argument-schema.patch 21. schema-validated repair of accidental arguments wrappers
 src/patches/qwen-mrope-cache-window.patch 22. cover the served target window in M-RoPE caches, including MTP
+src/patch_dflash_qwen4exp.py     23. dflash/DFlash2 seam on Qwen4Exp: speculative-method allowlist +
+                                     EAGLE-3-style target aux capture + QSA ring widening
+                                     (vllm#56088; ring port of vllm#54912) - see profiles/dflash.env
+src/test_dflash_patch_cpu.py        CPU unit test for patch 23 (anchors, idempotence, ring math)
 src/patch_load_pread.py          15. pread checkpoint tensors <= 64 MiB instead of mmap views     VLLM_LOAD_PREAD=0 disables
                                      (never the PLE table; needs 14)
 src/patch_moe_name_index.py      16. retired local expert-name index; v0.31 uses native upstream support
@@ -1201,10 +1237,11 @@ tools/pyspy_slices.py             summarize those slices by process / thread / f
 tools/Dockerfile.memory-diagnostics optional logging-only image for automatic KV sizing (issue #51)
 tools/patch_memory_profile_logging.py startup memory snapshots without allocation changes
 scripts/download-weights.sh       MODEL (default nvidia/Qwen3.8-Flash-Next-NVFP4), EXCLUDE, MAX_WORKERS, XET
+scripts/download-draft.sh         one-time: the DFlash2 draft model (DRAFT_MODEL, default incoai/Qwen3.8-Flash-Next-DFlash2, ~1.2 GiB) for the dflash profile
 scripts/prepare-hybrid.sh         one-time: build the -fp8hybrid snapshot
 scripts/prepare-mtp-graft.sh      one-time: graft the NVFP4 MTP draft experts onto it (MODE=hybrid-mtp, RadixArk only)
 tools/vllm_watch.py               live per-session view of prompts / reasoning / outputs / stats (needs LOG_REQUESTS=1; @0x3dlux)
-scripts/serve.sh                  MODE=nvfp4|hybrid|hybrid-mtp, SERVED_MODEL_NAME, PREFIX_CACHE, DET_TOPK, DRAFT_VOCAB, MADVISE, EXACT_TOPK, KV_DTYPE, YARN, ...
+scripts/serve.sh                  MODE=nvfp4|hybrid|hybrid-mtp, SERVED_MODEL_NAME, PREFIX_CACHE, DET_TOPK, DRAFT_VOCAB, DRAFT_MODEL, DRAFT_TOKENS, MADVISE, EXACT_TOPK, KV_DTYPE, YARN, ...
 scripts/smoke-test.sh             health, coherence, prefix-cache hit, determinism, tok/s
 scripts/greedy-probe.sh           greedy probe set; diff two arms to gate a draft/checkpoint swap
 scripts/run-humaneval.sh          HumanEval end-to-end: generate -> sandboxed execution -> report
