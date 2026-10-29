@@ -274,10 +274,19 @@ if [ "$YARN" != 0 ]; then OVR_ARGS=(--hf-overrides "$YARN_OVR"); ALLOW_LONG=1; f
 # No quality degradation observed in validation; DFlash uses more GPU memory.
 SPEC=()
 DRAFT_ENV=()
+DRAFT_MNT=()
 if [ -n "$DRAFT_MODEL" ]; then
   DRAFT_ENV=(-e VLLM_USE_V2_MODEL_RUNNER=1)  # init_speculator: dflash is a V2-runner path
   DRAFT_HOST=""
-  DRAFT_REPO_DIR="$HF_CACHE/hub/models--${DRAFT_MODEL//\//--}"
+  DRAFT_REPO_DIR="$HUB_DIR/models--${DRAFT_MODEL//\//--}"
+  DRAFT_HUB_IN=/hf/hub
+  # HF_HUB_DIRS may serve /hf/hub from a share download-draft.sh can't write to: then take the
+  # draft from $HF_CACHE/hub and mount its repo dir on its own (blobs are relative symlinks).
+  if [ ! -d "$DRAFT_REPO_DIR" ] && [ ${#HUB_MNT[@]} -gt 0 ]; then
+    DRAFT_REPO_DIR="$HF_CACHE/hub/models--${DRAFT_MODEL//\//--}"
+    DRAFT_HUB_IN=/hf-draft
+    DRAFT_MNT=(-v "$DRAFT_REPO_DIR:$DRAFT_HUB_IN/models--${DRAFT_MODEL//\//--}:ro")
+  fi
   for REF in main master; do
     REV="$(cat "$DRAFT_REPO_DIR/refs/$REF" 2>/dev/null || true)"
     if [ -n "$REV" ] && [ -d "$DRAFT_REPO_DIR/snapshots/$REV" ]; then DRAFT_HOST="$DRAFT_REPO_DIR/snapshots/$REV"; break; fi
@@ -287,7 +296,7 @@ if [ -n "$DRAFT_MODEL" ]; then
     echo "!! DRAFT_MODEL '$DRAFT_MODEL' not downloaded: run scripts/download-draft.sh first (one-time, ~1.2 GiB)."
     exit 1
   fi
-  DRAFT_IN="/hf/hub/models--${DRAFT_MODEL//\//--}/snapshots/$(basename "$DRAFT_HOST")"
+  DRAFT_IN="$DRAFT_HUB_IN/models--${DRAFT_MODEL//\//--}/snapshots/$(basename "$DRAFT_HOST")"
   if [ "$YARN" != 0 ]; then
     SPEC=(--speculative-config "{\"method\":\"dflash\",\"model\":\"$DRAFT_IN\",\"num_speculative_tokens\":${DRAFT_TOKENS},\"max_model_len\":${CTX}}")
   else
@@ -427,7 +436,7 @@ trap 'rc=$?; [ $rc -ne 0 ] && docker rm -f "$NAME" >/dev/null 2>&1; exit $rc' EX
 docker run "${RUN_FLAGS[@]}" --name "$NAME" \
   --gpus all --ipc=host --shm-size 16g -p "${PORT}:8000" \
   "${CPU_ARGS[@]}" \
-  -v "$HF_CACHE:/hf" "${HUB_MNT[@]}" -e HF_HOME=/hf -e HF_HUB_OFFLINE=1 \
+  -v "$HF_CACHE:/hf" "${HUB_MNT[@]}" "${DRAFT_MNT[@]}" -e HF_HOME=/hf -e HF_HUB_OFFLINE=1 \
   "${PROM_ARGS[@]}" \
   "${ALLOCATOR_ENV[@]}" \
   "${CACHE_MNT[@]}" "${TEMPLATE_MNT[@]}" "${LOG_MNT[@]}" \
