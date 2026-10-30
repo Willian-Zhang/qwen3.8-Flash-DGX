@@ -25,21 +25,28 @@ Handoff notes. Goal: cut the ~9 min of "Loading weights" at every boot of `qwen3
 
 ## State at handoff
 
+- **Since 2026-10-29 production is `qwen38-flash-dgx:v0.32`** (main's `Dockerfile`, vLLM v0.32) with
+  the DFlash2 draft (`DRAFT_MODEL=incoai/Qwen3.8-Flash-Next-DFlash2`, `MTP=0`) and `CPUSET=` (all 20
+  cores); see `systemd/qwen38-flash.env`. The next two bullets are the v0.30 state these notes
+  were measured on; v0.30 is kept for rollback (`IMAGE=qwen38-flash-dgx:v0.30`).
 - Image: `qwen38-flash-dgx:v0.30` (`Dockerfile.v0.30`, vLLM v0.30.0, patches 14–18 included) since
   2026-09-26; 108 s to ready, 84 s since `COMPILE_CACHE` also covers Triton and the driver JIT
-  (2026-09-29, last section). The preview image (`qwen38-flash-dgx:latest`, patches 1–18) is kept for
-  rollback: `IMAGE=` and `COMPILE_CACHE=qwen38` in the env file.
+  (2026-09-29, "Init engine on v0.30"). The preview image (`qwen38-flash-dgx:latest`, patches 1–18)
+  is no longer on the box (checked 2026-10-30). `Dockerfile.v0.30` only exists on the
+  `spark-service-v030` tag.
 - Serving `nvidia/Qwen3.8-Flash-Next-NVFP4`, `MODE=hybrid` (snapshot `fc694b5…-fp8hybrid`), YaRN 500k,
   MTP=2, `PREWARM=0`, `COMPILE_CACHE=qwen38v030` (docker volumes, reused: init engine 28 s on v0.30,
   31 s on the preview), port 8000.
   Settings: `systemd/qwen38-flash.env`; unit: `systemd/qwen38-flash.service`.
 - Weights are served from the kc3000 NFS share first (`HF_HUB_DIRS`, NFS over RDMA, mounted `ro` at
   `/mnt/nfs-share`), local `~/.cache/huggingface/hub` is the boot-time fallback (full copy kept).
-- Branch `spark-service` = `upstream/main` (blazux, 5108d90) + the systemd service, `HF_HUB_DIRS`,
-  `DOCKER_EXTRA` and these notes (pushed). Patches 14–18 are upstream: blazux#33 (14) and blazux#34
+- Branch `spark-service-v032` = `upstream/main` (blazux, 7e63dbe) + the systemd service,
+  `HF_HUB_DIRS`, `DOCKER_EXTRA` and these notes (pushed). It replaced `spark-service` (based on
+  5108d90, v0.30) on 2026-10-29. Patches 14–18 are upstream: blazux#33 (14) and blazux#34
   (15–18, also on `Dockerfile.v0.30`), both merged. vLLM: vllm-project/vllm#58720 (patch 16, merged
   09-26 in a rewritten form), issue vllm-project/vllm#58726 (the mmap H2D path; prefault proposal
-  posted 09-26, see the last section). The LMCache experiment lives on its own branch, `lmcache`.
+  posted 09-26) and PR vllm-project/vllm#58868 (the prefault fix, waiting on the `ready` label; see
+  "Upstream status (2026-10-30)"). The LMCache experiment lives on its own branch, `lmcache`.
 - Host-specific details (mounts, NFS exports, backups) are kept in private notes, not in this repo.
 
 ## Baseline (same checkpoint and recipe)
@@ -445,6 +452,26 @@ vLLM's `modelinfos` cache: the README's "−80 s" (PR #21) is the preview base's
 What remains in init engine: the vision-encoder profile (~5 s), a ~8.5 s wait in `make_dummy`
 (`torch.cumsum`, likely queued GPU work; also on the preview), the flashinfer GDN CuTe DSL compile
 (~2 s, in-memory cache only), graph captures (2 + 2 s).
+
+## Upstream status (2026-10-30)
+
+- **vllm#58868** (prefault at the copy sites, gated on `is_integrated_gpu()`): opened 09-27.
+  Approved by stecasta 10-12; reproduced on GB10 by stecasta, jschmied (505–534 s → 41.6–41.9 s with
+  #58720), JimmyToluene and gitbisector (TP4). Merge conflict fixed 10-29 (merged main, `81e0784d`).
+- **Blocker: the `pre-run-check` label gate.** It passes with `ready` / `ready-run-all-tests` /
+  `verified`, or once the author has ≥ 4 merged PRs (I have 1, #58720). The readthedocs failure is
+  the same gate: `docs/pre_run_check.sh` skips the build when `pre-run-check` failed.
+- **Slack asks.** 09-27: general request for review/`ready` plus a GH200/GB200 `is_integrated`
+  question, no replies. 10-30 10:37: asked @pavanimajety and @Yongye Zhu (GitHub `zyongye`), both
+  requested reviewers, to add `ready`. Picked from `committers.md` (NVIDIA GPU integration; MoE
+  kernels and quantization) and recent review activity; 22quinn (`model_loader` CODEOWNER) has no
+  reviews since 10-01, mgoin has ~1.7k open review requests. If nothing by ~11-06 (the docs'
+  7-day ping window), ping on the PR itself.
+- **vllm#58726**: nothing new since 10-23. Open thread: davised showed the discrete-GPU slow load is
+  the startup OpenMP pool (128 threads/worker on a 256-CPU host: 695–913 s → 41 s with
+  `OMP_NUM_THREADS=16`); I asked him to file a separate issue for a cap. None filed as of 10-30.
+- Related: #58857 merged (DeepSeek-V4 VL no longer sorts the weight stream); #58782 (AMD version)
+  and #55985 (fastsafetensors budget) still open.
 
 ## Rerunning the benchmark
 
