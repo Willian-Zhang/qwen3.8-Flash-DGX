@@ -19,6 +19,11 @@ if ! id -nG "$RUN_USER" | tr ' ' '\n' | grep -qx docker; then
   echo "!! $RUN_USER is not in the docker group; the service would fail to start"; exit 1
 fi
 
+if [ ! -f "$REPO/systemd/qwen38-flash.env" ]; then
+  cp "$REPO/systemd/qwen38-flash.env.example" "$REPO/systemd/qwen38-flash.env"
+  echo ">> created systemd/qwen38-flash.env from the example; review it before starting"
+fi
+
 sed -e "s|@USER@|$RUN_USER|g" -e "s|@REPO@|$REPO|g" "$REPO/systemd/qwen38-flash.service" \
   | sudo tee "$UNIT" >/dev/null
 sudo systemctl daemon-reload

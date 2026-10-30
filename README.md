@@ -452,7 +452,8 @@ tokens); `GPU_MEM=0.80` is the long-running-service setting, see [Tuning](#tunin
 Run it as a systemd service instead (starts on boot, restarts on crash, `journalctl -u qwen38-flash -f`):
 
 ```bash
-$EDITOR systemd/qwen38-flash.env         # same vars as serve.sh
+cp systemd/qwen38-flash.env.example systemd/qwen38-flash.env   # untracked; same vars as serve.sh
+$EDITOR systemd/qwen38-flash.env
 systemd/install.sh && systemctl start qwen38-flash   # install.sh adds a polkit rule: no sudo for start/stop/restart
 ```
 

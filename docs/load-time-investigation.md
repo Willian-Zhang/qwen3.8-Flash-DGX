@@ -27,7 +27,8 @@ Handoff notes. Goal: cut the ~9 min of "Loading weights" at every boot of `qwen3
 
 - **Since 2026-10-29 production is `qwen38-flash-dgx:v0.32`** (main's `Dockerfile`, vLLM v0.32) with
   the DFlash2 draft (`DRAFT_MODEL=incoai/Qwen3.8-Flash-Next-DFlash2`, `MTP=0`) and `CPUSET=` (all 20
-  cores); see `systemd/qwen38-flash.env`. The next two bullets are the v0.30 state these notes
+  cores); see `systemd/qwen38-flash.env` (untracked since 2026-10-30; template
+  `systemd/qwen38-flash.env.example`). The next two bullets are the v0.30 state these notes
   were measured on; v0.30 is kept for rollback (`IMAGE=qwen38-flash-dgx:v0.30`).
 - Image: `qwen38-flash-dgx:v0.30` (`Dockerfile.v0.30`, vLLM v0.30.0, patches 14–18 included) since
   2026-09-26; 108 s to ready, 84 s since `COMPILE_CACHE` also covers Triton and the driver JIT
